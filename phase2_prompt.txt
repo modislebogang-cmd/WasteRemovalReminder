@@ -1,0 +1,15 @@
+implement phase 2 of the app by first checking requirements for the new features and add only the required requirements 
+
+Add the following features: 1. Advanced filtering(modify the curent search to more powerful one)
+			    2. CSV export(managers can export product information and the file can be opened in microsoft excel/ google sheets) 
+			    3. Product Categories(product can be organized into categories and product status is shown)
+			    4. in-app notification(the dashboard must display alerts)
+			    5. User roles[
+					   staff - can scan product, add expiry dates, view products or mark products as removed
+					   manager - can view all products, view staff activity, export reports, manage categories and expiry information
+					]
+			    6. user activity(it must show the user time, username recorded reason )
+
+1. when implementing new features dont change the style, color, font or functionaliy of the app.
+2. for every feature added then test before adding new feature
+3. after adding all new features then test the whole app for

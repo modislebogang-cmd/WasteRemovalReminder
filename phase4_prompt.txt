@@ -1,0 +1,16 @@
+implement phase 4 of the app by first checking requirements for the new features and add only the required requirements 
+
+Add the following features: 1. Push notifications
+			    2. Daily Summary alerts
+			    3. Custom Alert Settings
+			    4. Escalation to manager
+			    5. Login page must consist of Staff Number and Phone number for now	
+			    
+Login page implementations using firestore - the user can login using staff number and phone number only registration can be done by
+					     admin(creater of the app) only. admin has access to register manager and staff using thier staff number, store 
+					     code, store name and phone number for verification. before login is processd a pop message must show saying that
+					     this a private app made by on the woolworths staff so its only for woolworths. MADE WITH LOVE USING AI BY YOURDEVLEBO
+
+1. when implementing new features dont change the style, color, font or functionaliy of the app.
+2. for every feature added then test before adding new feature
+3. after adding all new features then test the whole app for

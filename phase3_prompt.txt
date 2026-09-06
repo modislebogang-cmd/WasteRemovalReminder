@@ -1,0 +1,13 @@
+implement phase 3 of the app by first checking requirements for the new features and add only the required requirements 
+
+Add the following features: 1.cloud database(use google firebase)
+			    2. Multi-user Access
+			    3. Real-time Data Sync
+			    4. Store / Branch Management
+			    5. Activity Logs
+			    6. Profile Management	
+			    
+
+1. when implementing new features dont change the style, color, font or functionaliy of the app.
+2. for every feature added then test before adding new feature
+3. after adding all new features then test the whole app for
