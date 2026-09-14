@@ -7,19 +7,11 @@ import {
   LayoutDashboard, ScanLine, ListChecks, Download, Eye, LogOut, Activity, Filter, Store, UserCircle, ShieldCheck, Send, Save
 } from "lucide-react";
 import {
-  firebaseEnabled, watchAuth, signInWithStaff, registerStaffMember, saveUserSettings, logOut,
+  firebaseEnabled, watchAuth, signInWithStaff, getStaffProfile, registerStaffMember, saveUserSettings, logOut,
   createBranch, getBranchesForUser, watchBranch, addSharedProduct,
   updateSharedProduct, addActivity, saveBranchCategories, addBranchAlert
 } from "./firebase";
 import "./styles.css";
-
-const KEY = "rwr_products_v1";
-const USER_KEY = "rwr_user_v1";
-const ROLE_KEY = "rwr_user_role_v1";
-const ACTIVITY_KEY = "rwr_activity_v1";
-const CATEGORIES_KEY = "rwr_categories_v1";
-const BRANCH_KEY = "rwr_branch_v1";
-const SETTINGS_KEY = "rwr_alert_settings_v1";
 
 const todayISO = () => {
   const d = new Date();
@@ -37,52 +29,19 @@ const initialProducts = [
   {id: "3", barcode:"6005554443332", name:"Chicken Fillets", expiry:new Date(Date.now()+3*86400000).toISOString().slice(0,10), category:"Meat", status:"active"},
 ];
 
-function loadProducts() {
-  try { return JSON.parse(localStorage.getItem(KEY)) || initialProducts; }
-  catch { return initialProducts; }
-}
-function saveProducts(p) { localStorage.setItem(KEY, JSON.stringify(p)); }
-
-function loadRole() {
-  return localStorage.getItem(ROLE_KEY) || "staff";
-}
-function saveRole(r) { localStorage.setItem(ROLE_KEY, r); }
-
-function loadCategories() {
-  try { return JSON.parse(localStorage.getItem(CATEGORIES_KEY)) || ["Dairy", "Meat", "Bakery", "Beverages", "Frozen", "General"]; }
-  catch { return ["Dairy", "Meat", "Bakery", "Beverages", "Frozen", "General"]; }
-}
-function saveCategories(c) { localStorage.setItem(CATEGORIES_KEY, JSON.stringify(c)); }
-
-function loadActivity() {
-  try { return JSON.parse(localStorage.getItem(ACTIVITY_KEY)) || []; }
-  catch { return []; }
-}
-function saveActivity(a) { localStorage.setItem(ACTIVITY_KEY, JSON.stringify(a)); }
-function loadAlertSettings() { try { return { push: false, dailySummary: true, summaryTime: "08:00", reminderDays: 1, escalateAfterHours: 4, ...(JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}) }; } catch { return { push: false, dailySummary: true, summaryTime: "08:00", reminderDays: 1, escalateAfterHours: 4 }; } }
-
-function logActivity(username, action, details) {
-  const activities = loadActivity();
-  activities.unshift({
-    id: crypto.randomUUID(),
-    timestamp: new Date().toISOString(),
-    username,
-    action,
-    details
-  });
-  saveActivity(activities.slice(0, 1000)); // Keep last 1000 entries
-}
+const defaultCategories = ["Dairy", "Meat", "Bakery", "Beverages", "Frozen", "General"];
+const defaultAlertSettings = { push: false, dailySummary: true, summaryTime: "08:00", reminderDays: 1, escalateAfterHours: 4 };
 
 function App() {
-  const [products, setProducts] = useState(loadProducts);
+  const [products, setProducts] = useState([]);
   const [firebaseUser, setFirebaseUser] = useState(null);
   const [branches, setBranches] = useState([]);
-  const [branchId, setBranchId] = useState(() => localStorage.getItem(BRANCH_KEY) || "");
-  const [activities, setActivities] = useState(loadActivity);
+  const [branchId, setBranchId] = useState("");
+  const [activities, setActivities] = useState([]);
   const [syncError, setSyncError] = useState("");
-  const [user, setUser] = useState(() => localStorage.getItem(USER_KEY) || "");
-  const [userRole, setUserRole] = useState(loadRole);
-  const [categories, setCategories] = useState(loadCategories);
+  const [user, setUser] = useState("");
+  const [userRole, setUserRole] = useState("staff");
+  const [categories, setCategories] = useState(defaultCategories);
   const [tab, setTab] = useState("dashboard");
   const [showScanner, setShowScanner] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
@@ -92,17 +51,31 @@ function App() {
   const [filterCategory, setFilterCategory] = useState("all");
   const [filterExpiry, setFilterExpiry] = useState("all");
   const [showNotifications, setShowNotifications] = useState(true);
-  const [alertSettings, setAlertSettings] = useState(loadAlertSettings);
+  const [alertSettings, setAlertSettings] = useState(defaultAlertSettings);
   const [showStaffRegistration, setShowStaffRegistration] = useState(false);
-
-  useEffect(() => saveProducts(products), [products]);
-  useEffect(() => saveRole(userRole), [userRole]);
-  useEffect(() => saveCategories(categories), [categories]);
-  useEffect(() => localStorage.setItem(SETTINGS_KEY, JSON.stringify(alertSettings)), [alertSettings]);
 
   useEffect(() => {
     if (!firebaseEnabled) return;
-    return watchAuth(setFirebaseUser);
+    return watchAuth(async currentUser => {
+      setFirebaseUser(currentUser);
+      if (!currentUser) {
+        setUser("");
+        setUserRole("staff");
+        setBranchId("");
+        setBranches([]);
+        setProducts([]);
+        setActivities([]);
+        setCategories(defaultCategories);
+        setAlertSettings(defaultAlertSettings);
+        return;
+      }
+      const profile = await getStaffProfile(currentUser.uid);
+      if (profile) {
+        setUser(profile.staffNumber);
+        setUserRole(profile.role || "staff");
+        setAlertSettings({ ...defaultAlertSettings, ...(profile.settings || {}) });
+      }
+    });
   }, []);
 
   useEffect(() => {
@@ -112,7 +85,6 @@ function App() {
 
   useEffect(() => {
     if (!firebaseEnabled || !firebaseUser || !branchId) return;
-    localStorage.setItem(BRANCH_KEY, branchId);
     return watchBranch(branchId, setProducts, setCategories, setActivities, () => setSyncError("Live sync is unavailable for this branch."));
   }, [firebaseUser, branchId]);
 
@@ -121,8 +93,7 @@ function App() {
     if (firebaseEnabled && firebaseUser && branchId) {
       addActivity(branchId, { username, userId: firebaseUser.uid, action, details }).catch(() => setSyncError("Could not save activity."));
     } else {
-      logActivity(username, action, details);
-      setActivities(loadActivity());
+      setSyncError("Firebase is required to save activity.");
     }
   };
 
@@ -181,7 +152,8 @@ function App() {
     setShowAdd(false);
   };
 
-  if (firebaseEnabled && !firebaseUser) return <AuthView onSignIn={async (staffNumber, phoneNumber) => { const profile = await signInWithStaff(staffNumber, phoneNumber); localStorage.setItem(USER_KEY, profile.staffNumber); localStorage.setItem(ROLE_KEY, profile.role || "staff"); setUser(profile.staffNumber); setUserRole(profile.role || "staff"); }} onRegister={async (member, setupKey) => { await registerStaffMember(member, setupKey); alert("Team member registered."); }} />;
+  if (!firebaseEnabled) return <FirebaseConfigView />;
+  if (!firebaseUser || !user) return <AuthView onSignIn={async (staffNumber, phoneNumber) => { const profile = await signInWithStaff(staffNumber, phoneNumber); setUser(profile.staffNumber); setUserRole(profile.role || "staff"); }} onRegister={async (member, setupKey) => { await registerStaffMember(member, setupKey); alert("Team member registered."); }} />;
   if (firebaseEnabled && firebaseUser && !branchId) return <BranchView branches={branches} onSelect={setBranchId} onCreate={async name => {
     const branch = await createBranch(name, firebaseUser);
     setBranches(current => [...current, branch]);
@@ -301,7 +273,7 @@ function App() {
           <p className="eyebrow">ACCOUNT</p><h1>Settings</h1>
           <div className="settingsCard">
             <label>Registered user / team name</label>
-            <input value={user} onChange={e=>{setUser(e.target.value);localStorage.setItem(USER_KEY,e.target.value)}} placeholder="e.g. Store Team"/>
+            <input value={user} readOnly placeholder="Staff number"/>
             {firebaseEnabled && firebaseUser && <>
               <label>Account email</label><p className="hint">{firebaseUser.email}</p>
               <button className="secondary wide" onClick={async()=>{await updateUserProfile(firebaseUser,{displayName:user}); recordActivity("profile_updated", "Updated display name");}}><UserCircle size={18}/> Save profile</button>
@@ -349,6 +321,10 @@ function App() {
       {showAdd && <AddModal barcode={editingBarcode} onClose={()=>setShowAdd(false)} onSave={addProduct}/>}
     </div>
   );
+}
+
+function FirebaseConfigView() {
+  return <div className="modalBackdrop"><div className="modal"><p className="eyebrow">SECURE ACCESS</p><h2>Firebase configuration required</h2><p className="hint">Add the VITE_FIREBASE environment variables, then reload the app to sign in with your staff number and phone number.</p></div></div>;
 }
 
 function AuthView({onSignIn,onRegister}) {
@@ -471,7 +447,6 @@ function exportToCSV(products, username, onActivity) {
   window.URL.revokeObjectURL(url);
   
   if (onActivity) onActivity("csv_exported", `Exported ${products.length} products`);
-  else logActivity(username, "csv_exported", `Exported ${products.length} products`);
 }
 
 createRoot(document.getElementById("root")).render(<App/>);

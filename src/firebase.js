@@ -7,7 +7,27 @@ const app = firebaseEnabled ? initializeApp(firebaseConfig) : null;
 export const auth = app ? getAuth(app) : null;
 export const db = app ? getFirestore(app) : null;
 export const watchAuth = (callback) => auth ? onAuthStateChanged(auth, callback) : () => {};
-export async function signInWithStaff(staffNumber, phoneNumber) { if (!auth || !db) throw new Error("Firebase is not configured."); if (!auth.currentUser) await signInAnonymously(auth); const normalizedStaff = staffNumber.trim().toUpperCase(); const normalizedPhone = phoneNumber.replace(/\D/g, ""); const matches = await getDocs(query(collection(db, "staff"), where("staffNumber", "==", normalizedStaff), limit(1))); const staff = matches.docs[0]; if (!staff || staff.data().phoneNumber !== normalizedPhone) throw new Error("Staff number or phone number was not recognised."); return { id: staff.id, ...staff.data() }; }
+export async function signInWithStaff(staffNumber, phoneNumber) {
+	if (!auth || !db) throw new Error("Firebase is not configured.");
+	if (auth.currentUser) await signOut(auth);
+	const credential = await signInAnonymously(auth);
+	const normalizedStaff = staffNumber.trim().toUpperCase();
+	const normalizedPhone = phoneNumber.replace(/\D/g, "");
+	const matches = await getDocs(query(collection(db, "staff"), where("staffNumber", "==", normalizedStaff), limit(1)));
+	const staff = matches.docs[0];
+	if (!staff || staff.data().phoneNumber !== normalizedPhone) {
+		await signOut(auth);
+		throw new Error("Staff number or phone number was not recognised.");
+	}
+	await setDoc(staff.ref, { authUid: credential.user.uid }, { merge: true });
+	return { id: staff.id, ...staff.data(), authUid: credential.user.uid };
+}
+export async function getStaffProfile(authUid) {
+	if (!db) return null;
+	const matches = await getDocs(query(collection(db, "staff"), where("authUid", "==", authUid), limit(1)));
+	const staff = matches.docs[0];
+	return staff ? { id: staff.id, ...staff.data() } : null;
+}
 export const signIn = (email, password) => signInWithEmailAndPassword(auth, email, password);
 export const signUp = (email, password, displayName) => createUserWithEmailAndPassword(auth, email, password).then(async ({ user }) => { await updateProfile(user, { displayName }); return user; });
 export const updateUserProfile = (user, data) => updateProfile(user, data);
