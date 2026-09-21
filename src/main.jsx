@@ -152,14 +152,6 @@ function App() {
     setShowAdd(false);
   };
 
-  if (!firebaseEnabled) return <FirebaseConfigView />;
-  if (!firebaseUser || !user) return <AuthView onSignIn={async (staffNumber, phoneNumber) => { const profile = await signInWithStaff(staffNumber, phoneNumber); setUser(profile.staffNumber); setUserRole(profile.role || "staff"); }} onRegister={async (member, setupKey) => { await registerStaffMember(member, setupKey); alert("Team member registered."); }} />;
-  if (firebaseEnabled && firebaseUser && !branchId) return <BranchView branches={branches} onSelect={setBranchId} onCreate={async name => {
-    const branch = await createBranch(name, firebaseUser);
-    setBranches(current => [...current, branch]);
-    setBranchId(branch.id);
-  }} onSignOut={logOut}/>;
-
   useEffect(() => {
     if (!user || !("Notification" in window) || !showNotifications) return;
     const due = active.filter(p => daysUntil(p.expiry) <= 0);
@@ -168,7 +160,15 @@ function App() {
         body: due.length === 1 ? `${due[0].name} needs to be removed from the sales floor today.` : `${due.length} products need attention today.`
       });
     }
-  }, [user, showNotifications]);
+  }, [user, showNotifications, active]);
+
+  if (!firebaseEnabled) return <FirebaseConfigView />;
+  if (!firebaseUser || !user) return <AuthView onSignIn={async (staffNumber, phoneNumber) => { const profile = await signInWithStaff(staffNumber, phoneNumber); setUser(profile.staffNumber); setUserRole(profile.role || "staff"); }} onRegister={async (member, setupKey) => { await registerStaffMember(member, setupKey); alert("Team member registered."); }} />;
+  if (firebaseEnabled && firebaseUser && !branchId) return <BranchView branches={branches} onSelect={setBranchId} onCreate={async name => {
+    const branch = await createBranch(name, firebaseUser);
+    setBranches(current => [...current, branch]);
+    setBranchId(branch.id);
+  }} onSignOut={logOut}/>;
 
   return (
     <div className="app">

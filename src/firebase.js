@@ -45,7 +45,17 @@ export const updateUserProfile = (user, data) => updateProfile(user, data);
 export const logOut = () => signOut(auth);
 export async function registerStaffMember(member, setupKey) {
 	if (!auth || !db || !setupKey?.trim()) throw new Error("Admin setup key is required.");
-	const temporaryCredential = auth.currentUser ? null : await signInAnonymously(auth);
+	let temporaryCredential = null;
+	if (!auth.currentUser) {
+		try {
+			temporaryCredential = await signInAnonymously(auth);
+		} catch (error) {
+			if (error?.code === "auth/admin-restricted-operation") {
+				throw new Error("Registration is not enabled yet. In Firebase Console, open Authentication > Sign-in method and enable Anonymous, then try again.");
+			}
+			throw error;
+		}
+	}
 	try {
 		const staffNumber = member.staffNumber.trim().toUpperCase();
 		return await setDoc(doc(db, "staff", staffNumber), {
