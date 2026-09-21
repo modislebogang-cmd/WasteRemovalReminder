@@ -6,7 +6,10 @@ service cloud.firestore {
     match /staff/{staffId} {
       allow read: if signedIn();
       allow create: if signedIn() && request.resource.data.staffNumber == staffId;
-      allow update: if signedIn() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['settings']);
+      allow update: if signedIn() && (
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['settings']) ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['authUid']) && request.resource.data.authUid == request.auth.uid
+      );
     }
     match /branches/{branchId} {
       allow read: if member(branchId);

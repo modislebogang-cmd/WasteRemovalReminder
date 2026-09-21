@@ -43,7 +43,22 @@ export const signIn = (email, password) => signInWithEmailAndPassword(auth, emai
 export const signUp = (email, password, displayName) => createUserWithEmailAndPassword(auth, email, password).then(async ({ user }) => { await updateProfile(user, { displayName }); return user; });
 export const updateUserProfile = (user, data) => updateProfile(user, data);
 export const logOut = () => signOut(auth);
-export async function registerStaffMember(member, setupKey) { if (!db || !setupKey) throw new Error("Admin setup key is required."); return setDoc(doc(db, "staff", member.staffNumber.trim().toUpperCase()), { ...member, staffNumber: member.staffNumber.trim().toUpperCase(), phoneNumber: member.phoneNumber.replace(/\D/g, ""), setupKey, createdAt: serverTimestamp() }); }
+export async function registerStaffMember(member, setupKey) {
+	if (!auth || !db || !setupKey?.trim()) throw new Error("Admin setup key is required.");
+	const temporaryCredential = auth.currentUser ? null : await signInAnonymously(auth);
+	try {
+		const staffNumber = member.staffNumber.trim().toUpperCase();
+		return await setDoc(doc(db, "staff", staffNumber), {
+			...member,
+			staffNumber,
+			phoneNumber: member.phoneNumber.replace(/\D/g, ""),
+			setupKey: setupKey.trim(),
+			createdAt: serverTimestamp()
+		});
+	} finally {
+		if (temporaryCredential) await signOut(auth);
+	}
+}
 export async function getUserSettings(staffNumber) { if (!db) return null; const snapshot = await getDoc(doc(db, "staff", staffNumber)); return snapshot.exists() ? snapshot.data().settings || null : null; }
 export async function saveUserSettings(staffNumber, settings) { if (db) return setDoc(doc(db, "staff", staffNumber), { settings }, { merge: true }); }
 export async function addBranchAlert(branchId, alert) { if (db) return addDoc(branchCollection(branchId, "alerts"), { ...alert, createdAt: serverTimestamp() }); }
