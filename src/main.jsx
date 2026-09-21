@@ -174,8 +174,7 @@ function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <div className="brandIcon"><Trash2 size={20}/></div>
-          <div><strong>RemoveWaste</strong><span>Reminder</span></div>
+          <img className="brandLogo" src="/Wasteremovalreminder.png" alt="Waste Removal Reminder" />
         </div>
         <div className="topActions">
           <button className="iconBtn" onClick={async()=>{ if("Notification" in window) await Notification.requestPermission(); }} title="Enable notifications"><Bell size={19}/></button>
