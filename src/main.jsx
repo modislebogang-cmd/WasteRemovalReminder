@@ -7,7 +7,7 @@ import {
   LayoutDashboard, ScanLine, ListChecks, Download, Eye, LogOut, Activity, Filter, Store, UserCircle, ShieldCheck, Send, Save
 } from "lucide-react";
 import {
-  firebaseEnabled, watchAuth, signInWithStaff, getStaffProfile, registerStaffMember, saveUserSettings, logOut,
+  firebaseEnabled, watchAuth, signInWithStaff, getStaffProfile, registerStaffMember, saveUserSettings, saveSelectedBranch, saveBranchMemberProfile, logOut,
   createBranch, getBranchesForUser, watchBranch, addSharedProduct,
   updateSharedProduct, addActivity, saveBranchCategories, addBranchAlert
 } from "./firebase";
@@ -35,6 +35,7 @@ const defaultAlertSettings = { push: false, dailySummary: true, summaryTime: "08
 function App() {
   const [products, setProducts] = useState([]);
   const [firebaseUser, setFirebaseUser] = useState(null);
+  const [staffProfile, setStaffProfile] = useState(null);
   const [branches, setBranches] = useState([]);
   const [branchId, setBranchId] = useState("");
   const [activities, setActivities] = useState([]);
@@ -60,6 +61,7 @@ function App() {
       setFirebaseUser(currentUser);
       if (!currentUser) {
         setUser("");
+        setStaffProfile(null);
         setUserRole("staff");
         setBranchId("");
         setBranches([]);
@@ -71,8 +73,10 @@ function App() {
       }
       const profile = await getStaffProfile(currentUser.uid);
       if (profile) {
+        setStaffProfile(profile);
         setUser(profile.staffNumber);
         setUserRole(profile.role || "staff");
+        setBranchId(profile.selectedBranchId || "");
         setAlertSettings({ ...defaultAlertSettings, ...(profile.settings || {}) });
       }
     });
@@ -80,13 +84,17 @@ function App() {
 
   useEffect(() => {
     if (!firebaseEnabled || !firebaseUser) return;
-    return getBranchesForUser(firebaseUser.uid, setBranches, () => setSyncError("Could not load branches. Check your Firestore rules."));
-  }, [firebaseUser]);
+    return getBranchesForUser(firebaseUser.uid, currentBranches => {
+      setBranches(currentBranches);
+      if (branchId && !currentBranches.some(branch => branch.id === branchId)) setBranchId("");
+    }, () => setSyncError("Could not load branches. Check your Firestore rules."));
+  }, [firebaseUser, branchId]);
 
   useEffect(() => {
     if (!firebaseEnabled || !firebaseUser || !branchId) return;
+    if (staffProfile) saveBranchMemberProfile(branchId, firebaseUser.uid, staffProfile).catch(() => setSyncError("Could not save your branch profile."));
     return watchBranch(branchId, setProducts, setCategories, setActivities, () => setSyncError("Live sync is unavailable for this branch."));
-  }, [firebaseUser, branchId]);
+  }, [firebaseUser, branchId, staffProfile]);
 
   const recordActivity = (action, details) => {
     const username = user || firebaseUser?.email || "Anonymous";
@@ -101,6 +109,7 @@ function App() {
   const dueToday = active.filter(p => daysUntil(p.expiry) === 0);
   const expired = active.filter(p => daysUntil(p.expiry) < 0);
   const upcoming = active.filter(p => daysUntil(p.expiry) > 0 && daysUntil(p.expiry) <= 7);
+  const reminderProducts = active.filter(p => daysUntil(p.expiry) <= Number(alertSettings.reminderDays || 0));
 
   // Advanced filtering
   const filtered = useMemo(() => {
@@ -144,30 +153,39 @@ function App() {
     recordActivity("product_removed", `Product ID: ${id}`);
   };
 
-  const addProduct = (data) => {
+  const addProduct = async (data) => {
     const product = {...data, id: crypto.randomUUID(), status:"active"};
     setProducts(ps => [product, ...ps]);
-    if (firebaseEnabled && firebaseUser && branchId) addSharedProduct(branchId, product, firebaseUser.uid).catch(() => setSyncError("Could not save product."));
-    recordActivity("product_added", `${data.name} - ${data.category}`);
-    setShowAdd(false);
+    try {
+      if (firebaseEnabled && firebaseUser && branchId) await addSharedProduct(branchId, product, firebaseUser.uid);
+      recordActivity("product_added", `${data.name} - ${data.category}`);
+      setShowAdd(false);
+    } catch {
+      setProducts(ps => ps.filter(item => item.id !== product.id));
+      setSyncError("Could not save product. Check your branch access and try again.");
+    }
   };
 
   useEffect(() => {
     if (!user || !("Notification" in window) || !showNotifications) return;
-    const due = active.filter(p => daysUntil(p.expiry) <= 0);
-    if (Notification.permission === "granted" && due.length) {
+    const reminders = active.filter(p => daysUntil(p.expiry) <= Number(alertSettings.reminderDays || 0));
+    if (Notification.permission === "granted" && reminders.length) {
       new Notification("RemoveWasteReminder", {
-        body: due.length === 1 ? `${due[0].name} needs to be removed from the sales floor today.` : `${due.length} products need attention today.`
+        body: reminders.length === 1 ? `${reminders[0].name} needs attention soon.` : `${reminders.length} products need attention soon.`
       });
     }
-  }, [user, showNotifications, active]);
+  }, [user, showNotifications, active, alertSettings.reminderDays]);
 
   if (!firebaseEnabled) return <FirebaseConfigView />;
   if (!firebaseUser || !user) return <AuthView onSignIn={async (staffNumber, phoneNumber) => { const profile = await signInWithStaff(staffNumber, phoneNumber); setUser(profile.staffNumber); setUserRole(profile.role || "staff"); }} onRegister={async (member, setupKey) => { await registerStaffMember(member, setupKey); alert("Team member registered."); }} />;
-  if (firebaseEnabled && firebaseUser && !branchId) return <BranchView branches={branches} onSelect={setBranchId} onCreate={async name => {
+  if (firebaseEnabled && firebaseUser && !branchId) return <BranchView branches={branches} onSelect={selectedBranchId => {
+    setBranchId(selectedBranchId);
+    saveSelectedBranch(user, selectedBranchId).catch(() => setSyncError("Could not save your branch selection."));
+  }} onCreate={async name => {
     const branch = await createBranch(name, firebaseUser);
     setBranches(current => [...current, branch]);
     setBranchId(branch.id);
+    await saveSelectedBranch(user, branch.id);
   }} onSignOut={logOut}/>;
 
   return (
@@ -190,12 +208,12 @@ function App() {
 
       <main className="content">
         {syncError && <div className="inAppNotification"><AlertTriangle size={20}/><div><strong>Sync notice</strong><span>{syncError}</span></div><button onClick={() => setSyncError("")} className="closeNotif"><X size={16}/></button></div>}
-        {showNotifications && (dueToday.length > 0 || expired.length > 0) && (
+        {showNotifications && reminderProducts.length > 0 && (
           <div className="inAppNotification">
             <AlertTriangle size={20}/>
             <div>
               <strong>Action Required!</strong>
-              <span>{dueToday.length + expired.length} product(s) need to be removed</span>
+              <span>{reminderProducts.length} product(s) need attention within your alert window</span>
             </div>
             <button onClick={() => setShowNotifications(false)} className="closeNotif"><X size={16}/></button>
           </div>
@@ -368,21 +386,29 @@ function ProductCard({p,onRemove,userRole}) {
 
 function ScannerModal({onClose,onScanned}) {
   const scannerRef=useRef(null);
+  const capturedRef=useRef(false);
   const [error,setError]=useState("");
+  const [captured,setCaptured]=useState(false);
   useEffect(()=>{
     const scanner = new Html5Qrcode("barcode-reader");
     scannerRef.current=scanner;
     scanner.start({facingMode:"environment"},{fps:10,qrbox:{width:280,height:140}},
-      async text=>{ try{await scanner.stop()}catch{} onScanned(text) },
+      async text=>{
+        if (capturedRef.current) return;
+        capturedRef.current=true;
+        setCaptured(true);
+        try{await scanner.stop()}catch{}
+        window.setTimeout(() => onScanned(text), 450);
+      },
       ()=>{}
     ).catch(e=>setError("Camera access was blocked. Allow camera permission or add the barcode manually."));
     return ()=>{ if(scannerRef.current?.isScanning) scannerRef.current.stop().catch(()=>{}); };
   },[]);
   return <div className="modalBackdrop"><div className="modal scannerModal">
-    <button className="close" onClick={onClose}><X/></button><p className="eyebrow">BARCODE SCANNER</p><h2>Scan product</h2>
-    <div id="barcode-reader"></div>
+    <button className="close" onClick={onClose}><X/></button><p className="eyebrow">BARCODE SCANNER</p><h2>{captured ? "Barcode captured" : "Scan product"}</h2>
+    <div className={`scannerFrame ${captured ? "captured" : ""}`}><div id="barcode-reader"></div><div className="scannerGuide"><span></span></div></div>
     {error && <div className="error">{error}</div>}
-    <p className="hint">Point your phone camera at the product barcode. EAN-13, EAN-8, UPC and other common retail codes are supported by the scanner library.</p>
+    <p className="hint">{captured ? "Barcode captured. Complete the product name and expiry date to save the reminder." : "Point your phone camera at the product barcode. EAN-13, EAN-8, UPC and other common retail codes are supported by the scanner library."}</p>
   </div></div>
 }
 

@@ -59,4 +59,5 @@ button,input{font:inherit}button{cursor:pointer}.app{min-height:100vh;padding-bo
 .authLogo{display:block;width:min(310px,100%);height:58px;object-fit:contain;object-position:center;margin:0 auto 18px;mix-blend-mode:screen}
 .authModal input,.authModal .filterSelect{background:#080f09;border-color:#25422a;color:#f4f7f3}
 .adminRegisterBtn{margin-top:12px}
+.scannerFrame{position:relative;overflow:hidden;border-radius:14px}.scannerGuide{position:absolute;inset:12% 8%;border:2px solid var(--green);border-radius:12px;pointer-events:none;box-shadow:0 0 0 999px #02050a44}.scannerGuide span{position:absolute;left:0;right:0;top:50%;height:2px;background:var(--green);box-shadow:0 0 16px 4px #45df5088;animation:scan 1.8s ease-in-out infinite}.scannerFrame.captured .scannerGuide{border-color:var(--green);box-shadow:0 0 0 999px #12361866,0 0 28px #45df5077}.scannerFrame.captured .scannerGuide span{animation:none;background:#f4f7f3;box-shadow:0 0 18px 5px #f4f7f3aa}
 
