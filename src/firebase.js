@@ -1,7 +1,18 @@
 ﻿import { initializeApp } from "firebase/app";
 import { getAuth, onAuthStateChanged, signInAnonymously, signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile, signOut } from "firebase/auth";
 import { getFirestore, collection, doc, addDoc, setDoc, updateDoc, deleteDoc, getDoc, getDocs, query, where, orderBy, limit, onSnapshot, serverTimestamp } from "firebase/firestore";
-const firebaseConfig = { apiKey: import.meta.env.VITE_FIREBASE_API_KEY, authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN, projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID, storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET, messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID, appId: import.meta.env.VITE_FIREBASE_APP_ID };
+const defaultFirebaseConfig = {
+	apiKey: "AIzaSyCJ4c5LHMuXXfBAG29OFafCsMtWpSU84D4",
+	authDomain: "waste-627ab.firebaseapp.com",
+	projectId: "waste-627ab",
+	storageBucket: "waste-627ab.firebasestorage.app",
+	messagingSenderId: "236826139964",
+	appId: "1:236826139964:web:bf8dde3b8eb83a03189239"
+};
+const firebaseConfig = Object.fromEntries(Object.entries(defaultFirebaseConfig).map(([key, value]) => [
+	key,
+	import.meta.env[`VITE_FIREBASE_${key.replace(/[A-Z]/g, letter => `_${letter}`).toUpperCase()}`] || value
+]));
 export const firebaseEnabled = Object.values(firebaseConfig).every(Boolean);
 const app = firebaseEnabled ? initializeApp(firebaseConfig) : null;
 export const auth = app ? getAuth(app) : null;
