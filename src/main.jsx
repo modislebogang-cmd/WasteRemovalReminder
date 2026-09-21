@@ -54,6 +54,7 @@ function App() {
   const [showNotifications, setShowNotifications] = useState(true);
   const [alertSettings, setAlertSettings] = useState(defaultAlertSettings);
   const [showStaffRegistration, setShowStaffRegistration] = useState(false);
+  const [avatarVariant] = useState(() => Math.floor(Math.random() * 4));
 
   useEffect(() => {
     if (!firebaseEnabled) return;
@@ -196,13 +197,12 @@ function App() {
         </div>
         <div className="topActions">
           <button className="iconBtn" onClick={async()=>{ if("Notification" in window) await Notification.requestPermission(); }} title="Enable notifications"><Bell size={19}/></button>
-          <div className="roleSelector">
+          {(userRole === "manager" || userRole === "admin") && <div className="roleSelector">
             <select value={userRole} onChange={e=>{setUserRole(e.target.value); recordActivity("role_changed", `Changed to ${e.target.value}`);}} className="roleSelect">
-              <option value="staff">Staff</option>
-              <option value="manager">Manager</option><option value="admin">Admin</option>
+              <option value="staff">Staff</option><option value="manager">Manager</option><option value="admin">Admin</option>
             </select>
-          </div>
-          <button className="userChip" onClick={()=>setTab("settings")}>{(user || firebaseUser?.email || "U")[0].toUpperCase()}</button>
+          </div>}
+          <button className={`userChip avatarVariant${avatarVariant}`} onClick={()=>setTab("settings")} aria-label="Open user settings"><span>{(user || "U")[0].toUpperCase()}</span></button>
         </div>
       </header>
 
@@ -292,15 +292,12 @@ function App() {
             <label>Registered user / team name</label>
             <input value={user} readOnly placeholder="Staff number"/>
             {firebaseEnabled && firebaseUser && <>
-              <label>Account email</label><p className="hint">{firebaseUser.email}</p>
+              <label>Registered contact</label><p className="hint">{staffProfile?.email || staffProfile?.phoneNumber || "Phone verification account"}</p>
               <button className="secondary wide" onClick={async()=>{await updateUserProfile(firebaseUser,{displayName:user}); recordActivity("profile_updated", "Updated display name");}}><UserCircle size={18}/> Save profile</button>
               <button className="textBtn" onClick={logOut}><LogOut size={16}/> Sign out</button>
             </>}
             <label>User Role</label>
-            <select value={userRole} onChange={e=>setUserRole(e.target.value)} className="roleSelect">
-              <option value="staff">Staff</option>
-              <option value="manager">Manager</option><option value="admin">Admin</option>
-            </select>
+            <p className="hint">{userRole.charAt(0).toUpperCase() + userRole.slice(1)}</p>
             {(userRole === "manager" || userRole === "admin") && (
               <>
                 <label style={{marginTop:"20px"}}>Manage Categories</label>
