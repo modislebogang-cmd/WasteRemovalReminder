@@ -1,6 +1,8 @@
-﻿import React, { useEffect, useMemo, useRef, useState } from "react";
+﻿import "./instrument";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Html5Qrcode } from "html5-qrcode";
+import { reactErrorHandler } from "@sentry/react";
 import {
   Bell, Camera, CheckCircle2, ChevronRight, Clock3, Package,
   Plus, Search, Settings, Trash2, X, AlertTriangle, CalendarDays,
@@ -471,7 +473,11 @@ function exportToCSV(products, username, onActivity) {
   if (onActivity) onActivity("csv_exported", `Exported ${products.length} products`);
 }
 
-createRoot(document.getElementById("root")).render(<App/>);
+createRoot(document.getElementById("root"), {
+  onUncaughtError: reactErrorHandler(),
+  onCaughtError: reactErrorHandler(),
+  onRecoverableError: reactErrorHandler()
+}).render(<App/>);
 
 
 
