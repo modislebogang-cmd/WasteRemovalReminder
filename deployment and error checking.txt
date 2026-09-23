@@ -1,0 +1,17 @@
+firebase database error checking without changing the app process and styling: 
+				0. when user registers on the app it must be saved on the firebase database and they must:
+									1. input staff number, 
+									2. select Store(store combobox must be populated with the following stores 3156-Groblersdal and 3138-Jean Crossing) 
+									3. input phone number, 
+									4. input email and password,
+									5. then user must recieve OTP via sms or email
+				1. when user sign in they sign in using staff number and password only
+				2. when staff member adds expiry product it must be saved on the database
+				3. so that i can be store to make analytics to show store perfomance in waste removing
+				4. also show product expiry was saved by which store
+				5. user must be able to view/update their profile in settings
+				6. user must be able to see history of removed waste products (this history must be in the activity button menu)
+				7. suggest what can be added on my database before implementing ask if want to continue with it
+
+
+-for every step completed mark completed and test if its working before moving to the next step

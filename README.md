@@ -42,6 +42,40 @@ A React + Vite MVP for retail expiry control with advanced team management.
 - **Private App Notice**: Startup notice confirming Woolworths-only access ("MADE WITH LOVE USING AI BY YOURDEVLEBO")
 - **Three-Tier Role System**: Staff, Manager, and Admin roles with progressive permissions
 
+## Phase 5 Features ✨ (Deployment & Error Checking)
+- **Store Selection**: Registration uses a fixed store dropdown — `3156-Groblersdal` and `3138-Jean Crossing`
+- **Email/Password Registration**: Staff number, store, phone, email and password captured at sign-up
+- **OTP Email Verification**: Firebase sends a verification link; accounts stay `pending` until confirmed
+- **Staff-Number Sign-In**: Sign in with staff number + password only (no store or phone prompt)
+- **Store Attribution**: Every product records which store and which staff member saved it
+- **Waste Removal History**: Full removal log in the Activity menu, visible to all roles
+- **Store Analytics**: Waste performance per store — totals, on-time rate, overdue, value, by category and by staff
+- **Profile Editing**: View and update display name, phone and email in Settings
+- **Error Checking**: Firebase error codes are translated into readable messages for staff
+## Data Model
+```
+config/registration            { setupKey }                     # admin-only, never client-writable
+staff/{storeCode}-{STAFFNO}    { staffNumber, storeCode, storeName, phoneNumber, email,
+                                 role, status, authUid, settings, displayName }
+stores/{storeCode}             { code, name, memberUids, categories }
+  products/{productId}         { name, barcode, expiry, category, status,
+                                 storeCode, storeName, createdByStaffNumber, createdByName }
+  removals/{removalId}         { productId, productName, expiry, daysOverdue, wasteValue,
+                                 storeCode, removedByStaffNumber, removedByName, removedAt }
+  analyticsDaily/{YYYY-MM-DD}  { date, removedCount, wasteValue, byStaff }
+  activity/{activityId}        { username, userId, action, details, createdAt }
+  alerts/{alertId}             { message, from, type, status, createdAt }
+  members/{staffNumber}        { staffNumber, storeCode, ...profile }
+```
+
+### Setup required in Firebase Console
+1. **Authentication > Sign-in method**: enable **Email/Password**.
+2. Create the setup key document once, e.g. `config/registration` with field `setupKey: "<your-secret>"`.
+3. Deploy the rules and indexes:
+   ```bash
+   firebase deploy --only firestore
+   ```
+
 ## Run
 Use Node 20 LTS (recommended) or 22 LTS. Avoid newer Node 24 builds on some Windows setups, which can trigger native libuv "UV_HANDLE_CLOSING" assertions during Vite startup.
 

@@ -1,17 +1,16 @@
-﻿import "./instrument";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Html5Qrcode } from "html5-qrcode";
-import { reactErrorHandler } from "@sentry/react";
 import {
   Bell, Camera, CheckCircle2, ChevronRight, Clock3, Package,
   Plus, Search, Settings, Trash2, X, AlertTriangle, CalendarDays,
   LayoutDashboard, ScanLine, ListChecks, Download, Eye, LogOut, Activity, Filter, Store, UserCircle, ShieldCheck, Send, Save
 } from "lucide-react";
 import {
-  firebaseEnabled, watchAuth, signInWithStaff, getStaffProfile, registerStaffMember, saveUserSettings, saveSelectedBranch, saveBranchMemberProfile, logOut,
-  createBranch, getBranchesForUser, watchBranch, addSharedProduct,
-  updateSharedProduct, addActivity, saveBranchCategories, addBranchAlert
+  firebaseEnabled, watchAuth, signInWithStaff, getStaffProfile, registerStaffMember, saveUserSettings, logOut,
+  STORES, storeNameFor, watchStore, addSharedProduct, updateSharedProduct, addActivity, saveStoreCategories,
+  addStoreAlert, recordRemoval, watchRemovals, watchDailyAnalytics, updateStaffProfile, checkDatabaseHealth,
+  resendVerificationOtp, friendlyError
 } from "./firebase";
 import "./styles.css";
 
@@ -38,9 +37,10 @@ function App() {
   const [products, setProducts] = useState([]);
   const [firebaseUser, setFirebaseUser] = useState(null);
   const [staffProfile, setStaffProfile] = useState(null);
-  const [branches, setBranches] = useState([]);
-  const [branchId, setBranchId] = useState("");
+  const [storeCode, setStoreCode] = useState("");
   const [activities, setActivities] = useState([]);
+  const [removals, setRemovals] = useState([]);
+  const [analyticsDays, setAnalyticsDays] = useState([]);
   const [syncError, setSyncError] = useState("");
   const [user, setUser] = useState("");
   const [userRole, setUserRole] = useState("staff");
@@ -55,7 +55,6 @@ function App() {
   const [filterExpiry, setFilterExpiry] = useState("all");
   const [showNotifications, setShowNotifications] = useState(true);
   const [alertSettings, setAlertSettings] = useState(defaultAlertSettings);
-  const [showStaffRegistration, setShowStaffRegistration] = useState(false);
   const [avatarVariant] = useState(() => Math.floor(Math.random() * 4));
 
   useEffect(() => {
@@ -66,43 +65,61 @@ function App() {
         setUser("");
         setStaffProfile(null);
         setUserRole("staff");
-        setBranchId("");
-        setBranches([]);
+        setStoreCode("");
         setProducts([]);
         setActivities([]);
+        setRemovals([]);
+        setAnalyticsDays([]);
         setCategories(defaultCategories);
         setAlertSettings(defaultAlertSettings);
         return;
       }
-      const profile = await getStaffProfile(currentUser.uid);
-      if (profile) {
-        setStaffProfile(profile);
-        setUser(profile.staffNumber);
-        setUserRole(profile.role || "staff");
-        setBranchId(profile.selectedBranchId || "");
-        setAlertSettings({ ...defaultAlertSettings, ...(profile.settings || {}) });
+      try {
+        const profile = await getStaffProfile(currentUser.uid);
+        if (profile) {
+          setStaffProfile(profile);
+          setUser(profile.staffNumber);
+          setUserRole(profile.role || "staff");
+          setStoreCode(profile.storeCode || "");
+          setAlertSettings({ ...defaultAlertSettings, ...(profile.settings || {}) });
+        }
+      } catch (error) {
+        setSyncError(friendlyError(error));
       }
     });
   }, []);
 
+  // Requirement 2/3/4: live products, categories and activity for this store.
   useEffect(() => {
-    if (!firebaseEnabled || !firebaseUser) return;
-    return getBranchesForUser(firebaseUser.uid, currentBranches => {
-      setBranches(currentBranches);
-      if (branchId && !currentBranches.some(branch => branch.id === branchId)) setBranchId("");
-    }, () => setSyncError("Could not load branches. Check your Firestore rules."));
-  }, [firebaseUser, branchId]);
+    if (!firebaseEnabled || !firebaseUser || !storeCode) return;
+    return watchStore(storeCode, setProducts, setCategories, setActivities,
+      () => setSyncError("Live sync is unavailable for this store. Check your Firestore rules."));
+  }, [firebaseUser, storeCode]);
 
+  // Requirement 6: removal history for the Activity menu.
   useEffect(() => {
-    if (!firebaseEnabled || !firebaseUser || !branchId) return;
-    if (staffProfile) saveBranchMemberProfile(branchId, firebaseUser.uid, staffProfile).catch(() => setSyncError("Could not save your branch profile."));
-    return watchBranch(branchId, setProducts, setCategories, setActivities, () => setSyncError("Live sync is unavailable for this branch."));
-  }, [firebaseUser, branchId, staffProfile]);
+    if (!firebaseEnabled || !firebaseUser || !storeCode) return;
+    return watchRemovals(storeCode, setRemovals, () => setSyncError("Could not load removal history."));
+  }, [firebaseUser, storeCode]);
+
+  // Requirement 3: daily waste analytics.
+  useEffect(() => {
+    if (!firebaseEnabled || !firebaseUser || !storeCode) return;
+    return watchDailyAnalytics(storeCode, setAnalyticsDays, () => setSyncError("Could not load analytics."));
+  }, [firebaseUser, storeCode]);
+
+  // Staff identity used for attribution on products, removals and activity.
+  const currentStaff = useMemo(() => ({
+    staffNumber: staffProfile?.staffNumber || user || "",
+    displayName: staffProfile?.displayName || user || "",
+    authUid: firebaseUser?.uid || ""
+  }), [staffProfile, user, firebaseUser]);
 
   const recordActivity = (action, details) => {
-    const username = user || firebaseUser?.email || "Anonymous";
-    if (firebaseEnabled && firebaseUser && branchId) {
-      addActivity(branchId, { username, userId: firebaseUser.uid, action, details }).catch(() => setSyncError("Could not save activity."));
+    const username = user || "Anonymous";
+    if (firebaseEnabled && firebaseUser && storeCode) {
+      addActivity(storeCode, { username, userId: firebaseUser.uid, action, details })
+        .catch(error => setSyncError(friendlyError(error)));
     } else {
       setSyncError("Firebase is required to save activity.");
     }
@@ -117,14 +134,14 @@ function App() {
   // Advanced filtering
   const filtered = useMemo(() => {
     let result = active;
-    
+
     // Search filter
     if (search) {
-      result = result.filter(p => 
+      result = result.filter(p =>
         `${p.name} ${p.barcode} ${p.category}`.toLowerCase().includes(search.toLowerCase())
       );
     }
-    
+
     // Status filter
     if (filterStatus !== "all") {
       const d = daysUntil;
@@ -133,12 +150,12 @@ function App() {
       if (filterStatus === "upcoming") result = result.filter(p => d(p.expiry) > 0 && d(p.expiry) <= 7);
       if (filterStatus === "safe") result = result.filter(p => d(p.expiry) > 7);
     }
-    
+
     // Category filter
     if (filterCategory !== "all") {
       result = result.filter(p => p.category === filterCategory);
     }
-    
+
     // Expiry range filter
     if (filterExpiry !== "all") {
       const d = daysUntil;
@@ -146,26 +163,31 @@ function App() {
       if (filterExpiry === "4-7") result = result.filter(p => d(p.expiry) >= 4 && d(p.expiry) <= 7);
       if (filterExpiry === "8+") result = result.filter(p => d(p.expiry) > 7);
     }
-    
+
     return result;
   }, [active, search, filterStatus, filterCategory, filterExpiry]);
 
   const removeProduct = (id) => {
-    setProducts(ps => ps.map(p => p.id === id ? {...p, status:"removed"} : p));
-    if (firebaseEnabled && firebaseUser && branchId) updateSharedProduct(branchId, id, { status: "removed" }, firebaseUser.uid).catch(() => setSyncError("Could not update product."));
-    recordActivity("product_removed", `Product ID: ${id}`);
+    const target = products.find(p => p.id === id);
+    setProducts(ps => ps.map(p => p.id === id ? {...p, status:"removed", removedAt: new Date().toISOString(), removedByStaffNumber: currentStaff.staffNumber} : p));
+    if (firebaseEnabled && firebaseUser && storeCode) {
+      updateSharedProduct(storeCode, id, { status: "removed" }, currentStaff).catch(error => setSyncError(friendlyError(error)));
+      // Requirements 3 and 6: log the removal for analytics and history.
+      if (target) recordRemoval(storeCode, target, currentStaff).catch(error => setSyncError(friendlyError(error)));
+    }
+    recordActivity("product_removed", `${target?.name || id} - ${target?.category || "General"}`);
   };
 
   const addProduct = async (data) => {
     const product = {...data, id: crypto.randomUUID(), status:"active"};
     setProducts(ps => [product, ...ps]);
     try {
-      if (firebaseEnabled && firebaseUser && branchId) await addSharedProduct(branchId, product, firebaseUser.uid);
+      if (firebaseEnabled && firebaseUser && storeCode) await addSharedProduct(storeCode, product, currentStaff);
       recordActivity("product_added", `${data.name} - ${data.category}`);
       setShowAdd(false);
-    } catch {
+    } catch (error) {
       setProducts(ps => ps.filter(item => item.id !== product.id));
-      setSyncError("Could not save product. Check your branch access and try again.");
+      setSyncError(`Could not save product. ${friendlyError(error)}`);
     }
   };
 
@@ -180,16 +202,18 @@ function App() {
   }, [user, showNotifications, active, alertSettings.reminderDays]);
 
   if (!firebaseEnabled) return <FirebaseConfigView />;
-  if (!firebaseUser || !user) return <AuthView onSignIn={async (staffNumber, phoneNumber) => { const profile = await signInWithStaff(staffNumber, phoneNumber); setUser(profile.staffNumber); setUserRole(profile.role || "staff"); }} onRegister={async (member, setupKey) => { await registerStaffMember(member, setupKey); alert("Team member registered."); }} />;
-  if (firebaseEnabled && firebaseUser && !branchId) return <BranchView branches={branches} onSelect={selectedBranchId => {
-    setBranchId(selectedBranchId);
-    saveSelectedBranch(user, selectedBranchId).catch(() => setSyncError("Could not save your branch selection."));
-  }} onCreate={async name => {
-    const branch = await createBranch(name, firebaseUser);
-    setBranches(current => [...current, branch]);
-    setBranchId(branch.id);
-    await saveSelectedBranch(user, branch.id);
-  }} onSignOut={logOut}/>;
+  if (!firebaseUser || !user) return <AuthView
+    onSignIn={async (staffNumber, password) => {
+      const profile = await signInWithStaff(staffNumber, password);
+      setStaffProfile(profile);
+      setUser(profile.staffNumber);
+      setUserRole(profile.role || "staff");
+      setStoreCode(profile.storeCode || "");
+    }}
+    onRegister={async (member, setupKey) => { await registerStaffMember(member, setupKey); }}
+    onResendOtp={async (staffNumber, password) => resendVerificationOtp(staffNumber, password)}
+  />;
+  if (!storeCode) return <StoreMissingView profile={staffProfile} onSignOut={logOut} />;
 
   return (
     <div className="app">
@@ -291,13 +315,24 @@ function App() {
         {tab === "settings" && <section className="pageSection narrow">
           <p className="eyebrow">ACCOUNT</p><h1>Settings</h1>
           <div className="settingsCard">
-            <label>Registered user / team name</label>
-            <input value={user} readOnly placeholder="Staff number"/>
-            {firebaseEnabled && firebaseUser && <>
-              <label>Registered contact</label><p className="hint">{staffProfile?.email || staffProfile?.phoneNumber || "Phone verification account"}</p>
-              <button className="secondary wide" onClick={async()=>{await updateUserProfile(firebaseUser,{displayName:user}); recordActivity("profile_updated", "Updated display name");}}><UserCircle size={18}/> Save profile</button>
-              <button className="textBtn" onClick={logOut}><LogOut size={16}/> Sign out</button>
-            </>}
+            {/* Requirement 5: view and update the user profile. */}
+            <ProfileEditor
+              staffProfile={staffProfile}
+              storeCode={storeCode}
+              userRole={userRole}
+              onSave={async updates => {
+                await updateStaffProfile(staffProfile.id, updates);
+                setStaffProfile(current => ({ ...current, ...updates }));
+                if (firebaseUser) await updateUserProfile(firebaseUser, { displayName: updates.displayName || user });
+                recordActivity("profile_updated", "Updated profile details");
+              }}
+              onCheckHealth={async () => {
+                const result = await checkDatabaseHealth(storeCode);
+                recordActivity("db_health_check", result.message);
+                return result;
+              }}
+            />
+            <button className="textBtn" onClick={logOut}><LogOut size={16}/> Sign out</button>
             <label>User Role</label>
             <p className="hint">{userRole.charAt(0).toUpperCase() + userRole.slice(1)}</p>
             {(userRole === "manager" || userRole === "admin") && (
@@ -307,29 +342,39 @@ function App() {
                   {categories.map(cat => (
                     <div key={cat} className="categoryItem">
                       <span>{cat}</span>
-                      <button onClick={() => {const next = categories.filter(c => c !== cat); setCategories(next); if(firebaseEnabled && branchId) saveBranchCategories(branchId, next);}} className="removeBtn" style={{padding:"4px 8px"}}><Trash2 size={16}/></button>
+                      <button onClick={() => {const next = categories.filter(c => c !== cat); setCategories(next); if(firebaseEnabled && storeCode) saveStoreCategories(storeCode, next);}} className="removeBtn" style={{padding:"4px 8px"}}><Trash2 size={16}/></button>
                     </div>
                   ))}
                 </div>
                 <div style={{display:"flex", gap:"10px", marginTop:"10px"}}>
                   <input type="text" id="newCat" placeholder="New category" style={{flex:1, padding:"8px"}}/>
-                  <button onClick={() => {const el = document.getElementById("newCat"); if(el.value) { const next = [...categories, el.value]; setCategories(next); if(firebaseEnabled && branchId) saveBranchCategories(branchId, next); el.value = ""; }}} className="secondary">Add</button>
+                  <button onClick={() => {const el = document.getElementById("newCat"); if(el.value) { const next = [...categories, el.value]; setCategories(next); if(firebaseEnabled && storeCode) saveStoreCategories(storeCode, next); el.value = ""; }}} className="secondary">Add</button>
                 </div>
               </>
             )}
-            <AlertSettings settings={alertSettings} onChange={setAlertSettings} onRequestPush={async()=>{if("Notification" in window){const permission=await Notification.requestPermission();setAlertSettings(current=>({...current,push:permission === "granted"}))}}} onSave={async next=>{if(user) await saveUserSettings(user,next);recordActivity("alert_settings_updated","Updated alert preferences")}} onEscalate={async message=>{if(firebaseEnabled && firebaseUser && branchId) await addBranchAlert(branchId,{message,from:user,type:"manager_escalation",status:"open"});recordActivity("manager_escalation",message)}} />
+            <AlertSettings settings={alertSettings} onChange={setAlertSettings} onRequestPush={async()=>{if("Notification" in window){const permission=await Notification.requestPermission();setAlertSettings(current=>({...current,push:permission === "granted"}))}}} onSave={async next=>{if(staffProfile?.id) await saveUserSettings(staffProfile.id,next);recordActivity("alert_settings_updated","Updated alert preferences")}} onEscalate={async message=>{if(firebaseEnabled && firebaseUser && storeCode) await addStoreAlert(storeCode,{message,from:user,type:"manager_escalation",status:"open"});recordActivity("manager_escalation",message)}} />
             <p className="hint">Staff can scan products and manage removals. Managers can view activity, export reports, and manage categories.</p>
           </div>
         </section>}
 
-        {tab === "activity" && (userRole === "manager" || userRole === "admin") && <ActivityView activities={activities}/>} 
+        {/* Requirements 3 and 6: analytics + waste removal history, both in Activity. */}
+        {tab === "activity" && <ActivityView
+          activities={activities}
+          removals={removals}
+          analyticsDays={analyticsDays}
+          storeCode={storeCode}
+          storeName={storeNameFor(storeCode)}
+          userRole={userRole}
+          currentStaffNumber={currentStaff.staffNumber}
+        />}
       </main>
 
       <nav className="bottomNav">
         <NavItem active={tab==="dashboard"} icon={<LayoutDashboard/>} text="Dashboard" onClick={()=>setTab("dashboard")}/>
         <NavItem active={tab==="products"} icon={<ListChecks/>} text="Products" onClick={()=>setTab("products")}/>
         <NavItem active={false} icon={<ScanLine/>} text="Scan" primary onClick={()=>setShowScanner(true)}/>
-        {(userRole === "manager" || userRole === "admin") && <NavItem active={tab==="activity"} icon={<Activity/>} text="Activity" onClick={()=>setTab("activity")}/>}
+        {/* Requirement 6: Activity is available to every role so staff can see their own history. */}
+        <NavItem active={tab==="activity"} icon={<Activity/>} text="Activity" onClick={()=>setTab("activity")}/>
         <NavItem active={tab==="settings"} icon={<Settings/>} text="Settings" onClick={()=>setTab("settings")}/>
       </nav>
 
@@ -340,28 +385,130 @@ function App() {
 }
 
 function FirebaseConfigView() {
-  return <div className="modalBackdrop"><div className="modal"><p className="eyebrow">SECURE ACCESS</p><h2>Firebase configuration required</h2><p className="hint">Add the VITE_FIREBASE environment variables, then reload the app to sign in with your staff number and phone number.</p></div></div>;
+  return <div className="modalBackdrop"><div className="modal"><p className="eyebrow">SECURE ACCESS</p><h2>Firebase configuration required</h2><p className="hint">Add the VITE_FIREBASE environment variables, then reload the app to sign in with your staff number and password.</p></div></div>;
 }
 
-function AuthView({onSignIn,onRegister}) {
-  const [staffNumber,setStaffNumber]=useState(""); const [phoneNumber,setPhoneNumber]=useState(""); const [storeCode,setStoreCode]=useState(""); const [storeName,setStoreName]=useState(""); const [role,setRole]=useState("staff"); const [setupKey,setSetupKey]=useState(""); const [register,setRegister]=useState(false); const [error,setError]=useState("");
-  const submit=async e=>{e.preventDefault();setError("");if(!window.confirm("This is a private app made by Woolworths staff and is only for Woolworths. MADE WITH LOVE USING AI BY YOURDEVLEBO"))return;try{if(register){await onRegister({staffNumber,phoneNumber,storeCode,storeName,role},setupKey);setRegister(false)}else await onSignIn(staffNumber,phoneNumber)}catch(err){setError(err.message||"Could not verify those details.")}};
-  return <div className="modalBackdrop"><div className="modal authModal"><img className="authLogo" src="/Wasteremovalreminder.png" alt="Waste Removal Reminder"/><p className="eyebrow">SECURE ACCESS</p><h2>{register?"Register team member":"Staff sign in"}</h2><form onSubmit={submit}><label>Staff number<input value={staffNumber} onChange={e=>setStaffNumber(e.target.value)} required/></label><label>Phone number<input type="tel" value={phoneNumber} onChange={e=>setPhoneNumber(e.target.value)} required/></label>{register&&<><label>Store code<input value={storeCode} onChange={e=>setStoreCode(e.target.value)} required/></label><label>Store name<input value={storeName} onChange={e=>setStoreName(e.target.value)} required/></label><label>Role<select value={role} onChange={e=>setRole(e.target.value)} className="filterSelect"><option value="staff">Staff</option><option value="manager">Manager</option><option value="admin">Admin</option></select></label><label>Admin setup key<input type="password" value={setupKey} onChange={e=>setSetupKey(e.target.value)} required/></label></>}{error&&<div className="error">{error}</div>}<button className="primary wide" type="submit"><ShieldCheck size={18}/>{register?"Register member":"Verify and sign in"}</button></form><button className="secondary wide adminRegisterBtn" onClick={()=>setRegister(!register)}><ShieldCheck size={18}/>{register?"Back to sign in":"Register"}</button></div></div>;
+/**
+ * Requirements 0.1-0.5 and 1.
+ * Sign in takes a staff number and password only. Registration collects staff number,
+ * store, phone, email and password, then sends the OTP verification email.
+ */
+function AuthView({onSignIn,onRegister,onResendOtp}) {
+  const [staffNumber,setStaffNumber]=useState(""); const [password,setPassword]=useState("");
+  const [phoneNumber,setPhoneNumber]=useState(""); const [email,setEmail]=useState("");
+  const [storeCode,setStoreCode]=useState(""); const [role,setRole]=useState("staff");
+  const [setupKey,setSetupKey]=useState(""); const [register,setRegister]=useState(false);
+  const [error,setError]=useState(""); const [notice,setNotice]=useState(""); const [busy,setBusy]=useState(false);
+
+  const submit=async e=>{
+    e.preventDefault(); setError(""); setNotice("");
+    if(!window.confirm("This is a private app made by Woolworths staff and is only for Woolworths. MADE WITH LOVE USING AI BY YOURDEVLEBO"))return;
+    setBusy(true);
+    try{
+      if(register){
+        if(!storeCode){setError("Please select your store.");return;}
+        if(!email.trim()){setError("An email address is required for OTP verification.");return;}
+        if(password.length<6){setError("Password must be at least 6 characters.");return;}
+        await onRegister({staffNumber,phoneNumber,storeCode,role,email,password},setupKey);
+        setRegister(false); setPassword(""); setSetupKey("");
+        setNotice(`Registration submitted for ${staffNumber.toUpperCase()}. Check ${email} for the OTP verification link, then sign in.`);
+      } else {
+        await onSignIn(staffNumber,password);
+      }
+    }catch(err){
+      setError(err?.message||"Could not verify those details.");
+    }finally{ setBusy(false); }
+  };
+
+  const resend=async()=>{
+    setError(""); setNotice("");
+    if(!staffNumber||!password){setError("Enter your staff number and password first, then resend.");return;}
+    setBusy(true);
+    try{
+      const sent=await onResendOtp(staffNumber,password);
+      setNotice(sent?"A new OTP verification link has been sent to your email.":"Your account is already verified. You can sign in.");
+    }catch(err){ setError(err?.message||"Could not resend the verification link."); }
+    finally{ setBusy(false); }
+  };
+
+  return <div className="modalBackdrop"><div className="modal authModal">
+    <img className="authLogo" src="/Wasteremovalreminder.png" alt="Waste Removal Reminder"/>
+    <p className="eyebrow">SECURE ACCESS</p>
+    <h2>{register?"Register team member":"Staff sign in"}</h2>
+    <form onSubmit={submit}>
+      <label>Staff number<input value={staffNumber} onChange={e=>setStaffNumber(e.target.value)} required/></label>
+      {register&&<>
+        <label>Store<select value={storeCode} onChange={e=>setStoreCode(e.target.value)} className="filterSelect" required><option value="">Select store</option>{STORES.map(store=><option key={store.code} value={store.code}>{store.code}-{store.name}</option>)}</select></label>
+        <label>Phone number<input type="tel" value={phoneNumber} onChange={e=>setPhoneNumber(e.target.value)} required/></label>
+        <label>Email address<input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="name@example.com" required/></label>
+      </>}
+      <label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} required minLength={register?6:undefined}/></label>
+      {register&&<>
+        <label>Role<select value={role} onChange={e=>setRole(e.target.value)} className="filterSelect"><option value="staff">Staff</option><option value="manager">Manager</option><option value="admin">Admin</option></select></label>
+        <label>Admin setup key<input type="password" value={setupKey} onChange={e=>setSetupKey(e.target.value)} required/></label>
+      </>}
+      {error&&<div className="error">{error}</div>}
+      {notice&&<div className="hint">{notice}</div>}
+      <button className="primary wide" type="submit" disabled={busy}><ShieldCheck size={18}/>{busy?"Working...":register?"Register member":"Verify and sign in"}</button>
+    </form>
+    {!register&&<button className="secondary wide" onClick={resend} disabled={busy}>Resend OTP verification</button>}
+    <button className="secondary wide adminRegisterBtn" onClick={()=>{setRegister(!register);setError("");setNotice("");}}><ShieldCheck size={18}/>{register?"Back to sign in":"Register"}</button>
+  </div></div>;
 }
 function AlertSettings({settings,onChange,onRequestPush,onSave,onEscalate}) {
   const [message,setMessage]=useState("");
   return <div className="phase4Settings"><label><input type="checkbox" checked={settings.push} onChange={onRequestPush}/> Push notifications</label><label><input type="checkbox" checked={settings.dailySummary} onChange={e=>onChange({...settings,dailySummary:e.target.checked})}/> Daily summary alerts</label>{settings.dailySummary&&<label>Summary time<input type="time" value={settings.summaryTime} onChange={e=>onChange({...settings,summaryTime:e.target.value})}/></label>}<label>Alert lead time in days<input type="number" min="0" max="7" value={settings.reminderDays} onChange={e=>onChange({...settings,reminderDays:Number(e.target.value)})}/></label><label>Escalate after hours<input type="number" min="1" max="48" value={settings.escalateAfterHours} onChange={e=>onChange({...settings,escalateAfterHours:Number(e.target.value)})}/></label><button className="secondary wide" onClick={()=>onSave(settings)}><Save size={18}/> Save alert settings</button><label>Message for manager<input value={message} onChange={e=>setMessage(e.target.value)} placeholder="What needs manager attention?"/></label><button className="secondary wide" disabled={!message.trim()} onClick={()=>{onEscalate(message.trim());setMessage("")}}><Send size={18}/> Escalate to manager</button></div>;
 }
 
-function StaffRegistrationModal({onClose,onRegister}) {
-  const [staffNumber,setStaffNumber]=useState(""); const [phoneNumber,setPhoneNumber]=useState(""); const [storeCode,setStoreCode]=useState(""); const [storeName,setStoreName]=useState(""); const [role,setRole]=useState("staff"); const [setupKey,setSetupKey]=useState(""); const [error,setError]=useState("");
-  const submit=async event=>{event.preventDefault();setError("");try{await onRegister({staffNumber,phoneNumber,storeCode,storeName,role},setupKey)}catch(err){setError(err.message||"Could not register this staff member.")}};
-  return <div className="modalBackdrop"><div className="modal"><button className="close" onClick={onClose}><X/></button><p className="eyebrow">ADMINISTRATION</p><h2>Register staff member</h2><form onSubmit={submit}><label>Staff number<input value={staffNumber} onChange={e=>setStaffNumber(e.target.value)} required/></label><label>Phone number<input type="tel" value={phoneNumber} onChange={e=>setPhoneNumber(e.target.value)} required/></label><label>Store code<input value={storeCode} onChange={e=>setStoreCode(e.target.value)} required/></label><label>Store name<input value={storeName} onChange={e=>setStoreName(e.target.value)} required/></label><label>Role<select value={role} onChange={e=>setRole(e.target.value)} className="filterSelect"><option value="staff">Staff</option><option value="manager">Manager</option><option value="admin">Admin</option></select></label><label>Admin setup key<input type="password" value={setupKey} onChange={e=>setSetupKey(e.target.value)} required/></label>{error&&<div className="error">{error}</div>}<button className="primary wide" type="submit"><ShieldCheck size={18}/> Register member</button></form></div></div>;
+// Requirement 5: view and update the signed-in user's profile from Settings.
+function ProfileEditor({staffProfile,storeCode,userRole,onSave,onCheckHealth}) {
+  const [displayName,setDisplayName]=useState(""); const [phoneNumber,setPhoneNumber]=useState("");
+  const [email,setEmail]=useState(""); const [status,setStatus]=useState(""); const [busy,setBusy]=useState(false);
+
+  useEffect(()=>{
+    setDisplayName(staffProfile?.displayName || String());
+    setPhoneNumber(staffProfile?.phoneNumber || String());
+    setEmail(staffProfile?.email || String());
+  },[staffProfile]);
+
+  const save=async()=>{
+    setStatus(""); setBusy(true);
+    try{
+      await onSave({displayName:displayName.trim(),phoneNumber:phoneNumber.replace(/\D/g,""),email:email.trim().toLowerCase()});
+      setStatus("Profile updated.");
+    }catch(err){ setStatus(friendlyError(err)); }
+    finally{ setBusy(false); }
+  };
+
+  return <>
+    <label>Staff number</label>
+    <input value={staffProfile?.staffNumber || String()} readOnly/>
+    <label>Store</label>
+    <p className="hint">{storeCode?`${storeCode}-${storeNameFor(storeCode)}`:"Not assigned"}</p>
+    <label>Role</label>
+    <p className="hint">{(userRole||"staff").charAt(0).toUpperCase()+(userRole||"staff").slice(1)}</p>
+    <label>Display name</label>
+    <input value={displayName} onChange={e=>setDisplayName(e.target.value)} placeholder="How your name shows on activity"/>
+    <label>Phone number</label>
+    <input type="tel" value={phoneNumber} onChange={e=>setPhoneNumber(e.target.value)} placeholder="e.g. 0821234567"/>
+    <label>Email address</label>
+    <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="name@example.com"/>
+    <label>Account status</label>
+    <p className="hint">{staffProfile?.status==="active"?"Verified":staffProfile?.status==="disabled"?"Disabled":"Pending OTP verification"}</p>
+    {status&&<p className="hint">{status}</p>}
+    <button className="secondary wide" onClick={save} disabled={busy}><UserCircle size={18}/>{busy?"Saving...":"Save profile"}</button>
+    <button className="textBtn" onClick={async()=>{const r=await onCheckHealth(); setStatus(r.message);}}>Check database connection</button>
+  </>;
 }
 
-function BranchView({branches,onSelect,onCreate,onSignOut}) {
-  const [name,setName]=useState("");
-  return <div className="modalBackdrop"><div className="modal"><p className="eyebrow">STORE MANAGEMENT</p><h2>Select a branch</h2>{branches.map(branch=><button key={branch.id} className="secondary wide" onClick={()=>onSelect(branch.id)}><Store size={18}/>{branch.name}</button>)}<form onSubmit={e=>{e.preventDefault(); if(name.trim()) {onCreate(name.trim());setName("");}}}><label>New branch name<input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Main Street"/></label><button className="primary wide" type="submit"><Plus size={18}/> Create branch</button></form><button className="textBtn" onClick={onSignOut}><LogOut size={16}/> Sign out</button></div></div>;
+// Shown if a signed-in staff member has no store assigned on their record.
+function StoreMissingView({profile,onSignOut}) {
+  return <div className="modalBackdrop"><div className="modal">
+    <p className="eyebrow">STORE MANAGEMENT</p>
+    <h2>No store assigned</h2>
+    <p className="hint">Your staff record{profile?.staffNumber?` (${profile.staffNumber})`:""} is not linked to a store. Ask an administrator to assign you to 3156-Groblersdal or 3138-Jean Crossing, then sign in again.</p>
+    <button className="textBtn" onClick={onSignOut}><LogOut size={16}/> Sign out</button>
+  </div></div>;
 }
 
 function Stat({icon,label,value,tone}) {
@@ -377,7 +524,7 @@ function ProductCard({p,onRemove,userRole}) {
   const urgency=d<0?"expired":d===0?"today":d<=2?"soon":"normal";
   return <div className={`productCard ${urgency}`}>
     <div className="productIcon"><Package size={22}/></div>
-    <div className="productInfo"><strong>{p.name}</strong><span>{p.category || "General"} Â· {p.barcode}</span></div>
+    <div className="productInfo"><strong>{p.name}</strong><span>{p.category || "General"} · {p.barcode}</span></div>
     <div className="expiry"><span>{d<0?`${Math.abs(d)}d overdue`:d===0?"REMOVE TODAY":`${d}d left`}</span><b>{new Date(p.expiry).toLocaleDateString()}</b></div>
     {(onRemove && (userRole === "staff" || userRole === "manager")) && <button className="removeBtn" onClick={()=>onRemove(p.id)} title="Mark removed"><CheckCircle2 size={19}/></button>}
   </div>
@@ -423,25 +570,133 @@ function AddModal({barcode,onClose,onSave}) {
   </div></div>
 }
 
-function ActivityView({activities}) {
+/**
+ * Requirements 3 and 6.
+ * The Activity menu holds the waste-removal history for every role, plus a store
+ * performance panel for managers and admins.
+ */
+function ActivityView({activities,removals,analyticsDays,storeCode,storeName,userRole,currentStaffNumber}) {
+  const [pane,setPane]=useState("removals");
+  const isManager = userRole === "manager" || userRole === "admin";
+
+  // Requirement 3: store performance in waste removal.
+  const analytics = useMemo(()=>{
+    const totalRemoved = removals.length;
+    const totalWasteValue = removals.reduce((sum,r)=>sum+Number(r.wasteValue||0),0);
+    const overdueRemovals = removals.filter(r=>Number(r.daysOverdue||0)>0).length;
+    const onTimeRemovals = totalRemoved - overdueRemovals;
+    const byCategory = {};
+    removals.forEach(r=>{ const k=r.category||"General"; byCategory[k]=(byCategory[k]||0)+1; });
+    const byStaff = {};
+    removals.forEach(r=>{ const k=r.removedByName||r.removedByStaffNumber||"Unknown"; byStaff[k]=(byStaff[k]||0)+1; });
+    return {
+      totalRemoved,
+      totalWasteValue,
+      overdueRemovals,
+      onTimeRemovals,
+      onTimeRate: totalRemoved ? Math.round((onTimeRemovals/totalRemoved)*100) : 0,
+      categories: Object.entries(byCategory).sort((a,b)=>b[1]-a[1]),
+      staff: Object.entries(byStaff).sort((a,b)=>b[1]-a[1]),
+      days: analyticsDays
+    };
+  },[removals,analyticsDays]);
+
+  const money = value => `R ${Number(value||0).toFixed(2)}`;
+
   return <section className="pageSection">
-    <p className="eyebrow">AUDIT TRAIL</p><h1>User Activity</h1>
-    <div className="activityList">
-      {activities.length === 0 ? (
-        <Empty icon={<Activity/>} text="No activity recorded yet."/>
-      ) : (
-        activities.slice(0, 100).map(act => (
-          <div key={act.id} className="activityItem">
-            <div className="actTime">{new Date(act.timestamp).toLocaleString()}</div>
-            <div className="actInfo">
-              <strong>{act.username}</strong>
-              <span>{act.action.replace(/_/g, " ").toUpperCase()}</span>
-            </div>
-            <div className="actDetails">{act.details}</div>
-          </div>
-        ))
-      )}
+    <p className="eyebrow">STORE {storeCode ? `${storeCode}${storeName ? " \u00b7 " + storeName : ""}` : ""} {storeName?`\u00b7 ${storeName}`:""}</p>
+    <h1>Activity</h1>
+
+    <div className="filters">
+      <button className={`filterSelect ${pane==="removals"?"active":""}`} onClick={()=>setPane("removals")}>Waste removed ({removals.length})</button>
+      {isManager && <button className={`filterSelect ${pane==="analytics"?"active":""}`} onClick={()=>setPane("analytics")}>Store performance</button>}
+      {isManager && <button className={`filterSelect ${pane==="audit"?"active":""}`} onClick={()=>setPane("audit")}>Audit trail</button>}
     </div>
+
+    {pane==="removals" && <>
+      <div className="sectionHead"><div><p className="eyebrow">REMOVAL HISTORY</p><h2>Removed waste products</h2></div></div>
+      {removals.length===0 ? <Empty icon={<Trash2/>} text="No products have been removed yet."/>
+      : <div className="activityList">
+        {removals.slice(0,200).map(item => (
+          <div key={item.id} className="activityItem">
+            <div className="actTime">{item.removedAtISO ? new Date(item.removedAtISO).toLocaleString() : "just now"}</div>
+            <div className="actInfo">
+              <strong>{item.productName}</strong>
+              <span>{(item.category||"GENERAL").toUpperCase()}</span>
+            </div>
+            <div className="actDetails">
+              {item.barcode?`${item.barcode} \u00b7 `:""}
+              Expiry {item.expiry||"unknown"}
+              {Number(item.daysOverdue||0)>0?` \u00b7 ${item.daysOverdue}d overdue`:" \u00b7 removed on time"}
+              {` \u00b7 by ${item.removedByName||item.removedByStaffNumber||"unknown"}`}
+              {` \u00b7 ${item.storeName||storeName || String()}`}
+            </div>
+          </div>
+        ))}
+      </div>}
+    </>}
+
+    {pane==="analytics" && isManager && <>
+      <div className="sectionHead"><div><p className="eyebrow">STORE PERFORMANCE</p><h2>Waste removal analytics</h2></div></div>
+      <section className="stats">
+        <Stat icon={<Trash2/>} label="Products removed" value={analytics.totalRemoved} tone="danger"/>
+        <Stat icon={<CheckCircle2/>} label="Removed on time" value={`${analytics.onTimeRate}%`} tone="blue"/>
+        <Stat icon={<AlertTriangle/>} label="Removed overdue" value={analytics.overdueRemovals} tone="warning"/>
+      </section>
+      <div className="settingsCard">
+        <label>Estimated waste value</label>
+        <p className="hint">{money(analytics.totalWasteValue)} across {analytics.totalRemoved} removal(s)</p>
+
+        <label style={{marginTop:"16px"}}>By category</label>
+        {analytics.categories.length===0 ? <p className="hint">No removals recorded yet.</p>
+        : <div className="categoryList">
+          {analytics.categories.map(([cat,count]) => (
+            <div key={cat} className="categoryItem"><span>{cat}</span><span className="hint">{count}</span></div>
+          ))}
+        </div>}
+
+        <label style={{marginTop:"16px"}}>By staff member</label>
+        {analytics.staff.length===0 ? <p className="hint">No removals recorded yet.</p>
+        : <div className="categoryList">
+          {analytics.staff.map(([name,count]) => (
+            <div key={name} className="categoryItem">
+              <span>{name}{name===currentStaffNumber?" (you)":""}</span><span className="hint">{count}</span>
+            </div>
+          ))}
+        </div>}
+
+        <label style={{marginTop:"16px"}}>Last 30 days</label>
+        {analytics.days.length===0 ? <p className="hint">No daily totals recorded yet.</p>
+        : <div className="categoryList">
+          {analytics.days.map(day => (
+            <div key={day.id} className="categoryItem">
+              <span>{day.date}</span>
+              <span className="hint">{day.removedCount||0} removed \u00b7 {money(day.wasteValue)}</span>
+            </div>
+          ))}
+        </div>}
+      </div>
+    </>}
+
+    {pane==="audit" && isManager && <>
+      <div className="sectionHead"><div><p className="eyebrow">AUDIT TRAIL</p><h2>User activity</h2></div></div>
+      <div className="activityList">
+        {activities.length === 0 ? (
+          <Empty icon={<Activity/>} text="No activity recorded yet."/>
+        ) : (
+          activities.slice(0, 100).map(act => (
+            <div key={act.id} className="activityItem">
+              <div className="actTime">{new Date(act.timestamp).toLocaleString()}</div>
+              <div className="actInfo">
+                <strong>{act.username}</strong>
+                <span>{(act.action||"").replace(/_/g, " ").toUpperCase()}</span>
+              </div>
+              <div className="actDetails">{act.details}</div>
+            </div>
+          ))
+        )}
+      </div>
+    </>}
   </section>
 }
 
@@ -454,14 +709,14 @@ function exportToCSV(products, username, onActivity) {
     p.category,
     daysUntil(p.expiry)
   ]);
-  
+
   const csvContent = [
     ["Exported by:", username],
     ["Exported at:", new Date().toLocaleString()],
     [],
     [headers.join(","), ...rows.map(r => r.map(v => `"${v}"`).join(","))]
   ].flat().join("\n");
-  
+
   const blob = new Blob([csvContent], { type: "text/csv" });
   const url = window.URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -469,15 +724,11 @@ function exportToCSV(products, username, onActivity) {
   a.download = `products_${new Date().toISOString().slice(0,10)}.csv`;
   a.click();
   window.URL.revokeObjectURL(url);
-  
+
   if (onActivity) onActivity("csv_exported", `Exported ${products.length} products`);
 }
 
-createRoot(document.getElementById("root"), {
-  onUncaughtError: reactErrorHandler(),
-  onCaughtError: reactErrorHandler(),
-  onRecoverableError: reactErrorHandler()
-}).render(<App/>);
+createRoot(document.getElementById("root")).render(<App/>);
 
 
 
