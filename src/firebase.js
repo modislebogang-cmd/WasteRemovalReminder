@@ -1,7 +1,7 @@
 import { initializeApp } from "firebase/app";
 import {
 	getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
-	updateProfile, signOut, sendEmailVerification, sendPasswordResetEmail, reload
+	updateProfile, signOut, sendPasswordResetEmail
 } from "firebase/auth";
 import {
 	getFirestore, collection, doc, addDoc, setDoc, updateDoc, getDoc, getDocs,
@@ -93,11 +93,6 @@ export async function signInWithStaff(staffNumber, password) {
 	const { credential, storeCode } = await signInAcrossStores(number, password);
 
 	// From here the caller is authenticated, so staff reads are permitted.
-	if (!credential.user.emailVerified) {
-	await signOut(auth);
-	throw new Error("Verify your account using the OTP link sent to your email, then sign in again.");
-	}
-
 	const docId = staffDocId(storeCode, number);
 	let profile;
 	try {
@@ -128,6 +123,20 @@ export async function signInWithStaff(staffNumber, password) {
 	// block sign-in on it.
 	}
 
+	// Record the uid -> store lookup the security rules rely on. Staff documents are
+	// keyed by store+staffNumber, which the rules cannot resolve from an auth uid, so
+	// this small mirror is what makes store-scoped access provable.
+	try {
+	await setDoc(doc(db, "staffByUid", credential.user.uid), {
+		staffDocId: docId,
+		storeCode,
+		staffNumber: number,
+		role: profile.role === "manager" ? "manager" : "staff"
+	}, { merge: true });
+	} catch {
+	// Non-fatal for the session; the rules may deny store reads until it exists.
+	}
+
 	return { ...profile, authUid: credential.user.uid, status: "active" };
 }
 
@@ -148,18 +157,6 @@ async function signInAcrossStores(staffNumber, password) {
 	}
 	}
 	throw new Error(friendlyError(lastError));
-}
-
-// Re-send the verification OTP for an account that hasn't confirmed yet.
-export async function resendVerificationOtp(staffNumber, password) {
-	if (!auth || !db) throw new Error("Firebase is not configured.");
-	const number = String(staffNumber || "").trim().toUpperCase();
-	if (!number) throw new Error("Enter your staff number.");
-	const { credential } = await signInAcrossStores(number, password);
-	if (credential.user.emailVerified) { await signOut(auth); return false; }
-	await sendEmailVerification(credential.user);
-	await signOut(auth);
-	return true;
 }
 
 export const sendStaffPasswordReset = async (staffNumber) => {
@@ -203,8 +200,7 @@ export const logOut = () => signOut(auth);
 
 /**
  * Requirements 0.1-0.5: register a staff member.
- * Creates the Auth credential (which triggers the verification OTP email), writes the
- * staff document, and enrols them in their store.
+ * Creates the Auth credential, writes the staff document, and enrols them in their store.
  */
 export async function registerStaffMember(member) {
 	if (!auth || !db) throw new Error("Firebase is not configured.");
@@ -221,7 +217,7 @@ export async function registerStaffMember(member) {
 
 	const docId = staffDocId(storeCode, staffNumber);
 
-	// Creating the Auth user triggers the verification (OTP) email.
+	// Create the Auth user for the derived staff address.
 	let credential;
 	try {
 	credential = await createUserWithEmailAndPassword(auth, authEmailFor(storeCode, staffNumber), member.password);
@@ -231,6 +227,14 @@ export async function registerStaffMember(member) {
 	await updateProfile(credential.user, { displayName: `${staffNumber} (${storeNameFor(storeCode)})` });
 
 	try {
+	// Write the uid link FIRST: every store-scoped rule resolves the caller's store
+	// through it, so nothing else can be authorised until it exists.
+	await setDoc(doc(db, "staffByUid", credential.user.uid), {
+		staffDocId: docId,
+		storeCode,
+		staffNumber,
+		role
+	}, { merge: true });
 	await setDoc(doc(db, "staff", docId), {
 	staffNumber,
 	storeCode,
@@ -247,7 +251,6 @@ export async function registerStaffMember(member) {
 	name: storeNameFor(storeCode),
 	memberUids: [credential.user.uid]
 	}, { merge: true });
-	await sendEmailVerification(credential.user);
 	} catch (error) {
 	// Don't leave an orphaned Auth credential if the Firestore write failed.
 	await signOut(auth).catch(() => {});

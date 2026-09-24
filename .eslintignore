@@ -1,0 +1,17 @@
+# Third-party dependencies — never lint these, they are not our code.
+node_modules/
+
+# Production build output.
+dist/
+build/
+
+# Generated / tooling files.
+.vite/
+*.min.js
+*.min.cjs
+
+# Firebase emulator + hosting artifacts.
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log

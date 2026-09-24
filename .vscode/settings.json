@@ -1,3 +1,24 @@
 {
-    "CodeGPT.apiKey": "CodeGPT Plus Beta"
+    "CodeGPT.apiKey": "CodeGPT Plus Beta",
+    // Never lint or validate third-party dependency code.
+    "eslint.validate": ["javascript", "javascriptreact"],
+    "eslint.lintTask.enable": false,
+    // Keep node_modules and build output out of Problems, search and the explorer.
+    "files.exclude": {
+        "**/node_modules": true,
+        "**/dist": true,
+        ".firebase": true
+    },
+    "search.exclude": {
+        "**/node_modules": true,
+        "**/dist": true,
+        "**/package-lock.json": true
+    },
+    "files.watcherExclude": {
+        "**/node_modules/**": true,
+        "**/dist/**": true
+    },
+    // Only check our own source, not dependencies.
+    "typescript.validate.enable": false,
+    "javascript.suggest.autoImports": true
 }

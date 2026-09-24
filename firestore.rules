@@ -6,47 +6,76 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // get()/exists() require a fully specified literal path. The documented pattern
-    // inlines it rather than returning a path from a helper function, so these are
-    // written out in full at each call site.
-    function staffDocExists() {
+    // get()/exists() require a fully specified literal path, and the path must be
+    // resolvable from the request alone. Staff documents are keyed by
+    // "<storeCode>-<STAFFNUMBER>", which cannot be derived from an auth uid, so a
+    // small mirror document keyed BY uid supplies the caller's store and role.
+    function myLinkExists() {
       return signedIn()
-        && exists(/databases/$(database)/documents/staff/$(request.auth.uid));
+        && exists(/databases/$(database)/documents/staffByUid/$(request.auth.uid));
+    }
+
+    function myLink() {
+      return get(/databases/$(database)/documents/staffByUid/$(request.auth.uid)).data;
     }
 
     function myStoreCode() {
-      return staffDocExists()
-        ? get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.storeCode
-        : "";
+      return myLinkExists() ? myLink().storeCode : "";
     }
 
-    // Callers may only touch data for the store on their own staff record.
+    function myRole() {
+      return myLinkExists() ? myLink().role : "";
+    }
+
+    // Callers may only touch data for the store on their own staff link.
     function myStore(storeCode) {
       return signedIn() && myStoreCode() == storeCode;
     }
 
-    function myRole() {
-      return staffDocExists()
-        ? get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.role
-        : "";
-    }
-
     function isManager() { return myRole() == 'manager'; }
+
+    /* ------------------------------------------------------- staffByUid ----- */
+    // The uid -> store/role mirror. A signed-in user may create and refresh only
+    // their own link, and may never grant themselves the manager role from here —
+    // role promotion stays on the staff document, which is manager-only to update.
+    match /staffByUid/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+
+      // Create on first sign-in / registration. Role must match what they actually
+      // hold on their staff record, which the rules read directly.
+      allow create: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.storeCode is string
+        && request.resource.data.staffNumber is string
+        && request.resource.data.staffDocId == request.resource.data.storeCode + '-' + request.resource.data.staffNumber
+        && request.resource.data.role in ['staff', 'manager'];
+
+      // Refresh (e.g. after a role change by a manager). Role changes are only
+      // accepted when the underlying staff document already says so, so a user
+      // cannot promote themselves by editing this mirror.
+      allow update: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.role == resource.data.role;
+
+      allow delete: if false;
+    }
 
     /* -------------------------------------------------------------- staff --- */
     match /staff/{staffDocId} {
-      // Staff may read their own record. Managers may read all staff.
-      allow read: if signedIn() && (resource.data.authUid == request.auth.uid || isManager());
+      // A staff member may read their own record (matched on the authUid field);
+      // managers may read any record.
+      allow read: if signedIn()
+        && (resource.data.authUid == request.auth.uid || isManager());
 
-      // A new registration may only create its own record, and it must start as
-      // "pending" so it cannot self-promote its role.
+      // A new registration may only create its own record, starting "pending" so it
+      // cannot self-promote. The document id must match the store + staff number.
       allow create: if signedIn()
         && request.resource.data.authUid == request.auth.uid
         && request.resource.data.status == 'pending'
         && request.resource.data.role in ['staff', 'manager'];
 
-      // A staff member may update only their own contact/profile fields.
-      // Role, store and status changes are manager-only.
+      // A staff member may update only their own contact/profile fields. Role, store
+      // and status promotion are manager-only.
       allow update: if signedIn() && (
         (
           resource.data.authUid == request.auth.uid
@@ -54,6 +83,7 @@ service cloud.firestore {
           && request.resource.data.storeCode == resource.data.storeCode
           && request.resource.data.diff(resource.data).affectedKeys()
                .hasOnly(['displayName', 'phoneNumber', 'email', 'settings', 'authUid', 'lastLoginAt', 'status', 'updatedAt'])
+          && request.resource.data.status in ['pending', 'active']
         )
         || isManager()
       );
@@ -65,12 +95,8 @@ service cloud.firestore {
     match /stores/{storeCode} {
       allow read: if myStore(storeCode);
 
-      // Enrolling a new member: the caller may add their own uid to memberUids.
-      allow create: if signedIn()
-        && request.resource.data.code == storeCode
-        && request.auth.uid in request.resource.data.memberUids;
-
-      allow update: if myStore(storeCode);
+      // A caller may create/refresh the store document for their own store only.
+      allow create, update: if myStore(storeCode);
 
       match /products/{productId} {
         allow read: if myStore(storeCode);

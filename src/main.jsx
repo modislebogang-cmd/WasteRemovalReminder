@@ -10,7 +10,7 @@ import {
   firebaseEnabled, watchAuth, signInWithStaff, getStaffProfile, registerStaffMember, saveUserSettings, logOut,
   STORES, storeNameFor, watchStore, addSharedProduct, updateSharedProduct, addActivity, saveStoreCategories,
   addStoreAlert, recordRemoval, watchRemovals, watchDailyAnalytics, updateStaffProfile, checkDatabaseHealth,
-  resendVerificationOtp, friendlyError
+  sendStaffPasswordReset, friendlyError
 } from "./firebase";import "./styles.css";
 
 // The staff document is keyed by store + staff number, neither of which is known on
@@ -235,7 +235,7 @@ function App() {
       setAlertSettings({ ...defaultAlertSettings, ...(profile.settings || {}) });
     }}
     onRegister={async (member) => { await registerStaffMember(member); }}
-    onResendOtp={async (staffNumber, password) => resendVerificationOtp(staffNumber, password)}
+    onForgotPassword={async (staffNumber) => sendStaffPasswordReset(staffNumber)}
   />;
   if (!storeCode) return <StoreMissingView profile={staffProfile} onSignOut={logOut} />;
 
@@ -415,13 +415,14 @@ function FirebaseConfigView() {
 /**
  * Requirements 0.1-0.5 and 1.
  * Sign in takes a staff number and password only. Registration collects staff number,
- * store, phone, email and password, then sends the OTP verification email.
+ * store, phone, email and password.
  */
-function AuthView({onSignIn,onRegister,onResendOtp}) {
+function AuthView({onSignIn,onRegister,onForgotPassword}) {
   const [staffNumber,setStaffNumber]=useState(""); const [password,setPassword]=useState("");
   const [phoneNumber,setPhoneNumber]=useState(""); const [email,setEmail]=useState("");
   const [storeCode,setStoreCode]=useState(""); const [role,setRole]=useState("staff");
   const [register,setRegister]=useState(false);
+  const [forgot,setForgot]=useState(false);
   const [error,setError]=useState(""); const [notice,setNotice]=useState(""); const [busy,setBusy]=useState(false);
 
   const submit=async e=>{
@@ -431,11 +432,11 @@ function AuthView({onSignIn,onRegister,onResendOtp}) {
     try{
       if(register){
         if(!storeCode){setError("Please select your store.");return;}
-        if(!email.trim()){setError("An email address is required for OTP verification.");return;}
+        if(!email.trim()){setError("An email address is required.");return;}
         if(password.length<6){setError("Password must be at least 6 characters.");return;}
         await onRegister({staffNumber,phoneNumber,storeCode,role,email,password});
         setRegister(false); setPassword("");
-        setNotice(`Registration submitted for ${staffNumber.toUpperCase()}. Check ${email} for the OTP verification link, then sign in.`);
+        setNotice(`Registration submitted for ${staffNumber.toUpperCase()}. You can now sign in with your password.`);
       } else {
         await onSignIn(staffNumber,password);
       }
@@ -444,16 +445,33 @@ function AuthView({onSignIn,onRegister,onResendOtp}) {
     }finally{ setBusy(false); }
   };
 
-  const resend=async()=>{
-    setError(""); setNotice("");
-    if(!staffNumber||!password){setError("Enter your staff number and password first, then resend.");return;}
+  // Forgot password: the staff number alone identifies the account, so a reset
+  // link is emailed to the address registered against it.
+  const sendReset=async e=>{
+    e.preventDefault(); setError(""); setNotice("");
+    if(!staffNumber){setError("Enter your staff number first.");return;}
     setBusy(true);
     try{
-      const sent=await onResendOtp(staffNumber,password);
-      setNotice(sent?"A new OTP verification link has been sent to your email.":"Your account is already verified. You can sign in.");
-    }catch(err){ setError(err?.message||"Could not resend the verification link."); }
-    finally{ setBusy(false); }
+      await onForgotPassword(staffNumber);
+      setForgot(false); setPassword("");
+      setNotice(`Password reset link sent for ${staffNumber.toUpperCase()}. Check the email address registered to that staff number, then sign in with your new password.`);
+    }catch(err){
+      setError(err?.message||"Could not send the password reset link.");
+    }finally{ setBusy(false); }
   };
+
+  if(forgot) return <div className="modalBackdrop"><div className="modal authModal">
+    <img className="authLogo" src="/Wasteremovalreminder.png" alt="Waste Removal Reminder"/>
+    <p className="eyebrow">SECURE ACCESS</p>
+    <h2>Reset your password</h2>
+    <form onSubmit={sendReset}>
+      <label>Staff number<input value={staffNumber} onChange={e=>setStaffNumber(e.target.value)} required/></label>
+      {error&&<div className="error">{error}</div>}
+      {notice&&<div className="hint">{notice}</div>}
+      <button className="primary wide" type="submit" disabled={busy}><Send size={18}/>{busy?"Working...":"Send reset link"}</button>
+    </form>
+    <button className="secondary wide adminRegisterBtn" onClick={()=>{setForgot(false);setError("");setNotice("");}}>{register?"Back to sign in":"Back to sign in"}</button>
+  </div></div>;
 
   return <div className="modalBackdrop"><div className="modal authModal">
     <img className="authLogo" src="/Wasteremovalreminder.png" alt="Waste Removal Reminder"/>
@@ -472,9 +490,9 @@ function AuthView({onSignIn,onRegister,onResendOtp}) {
       </>}
       {error&&<div className="error">{error}</div>}
       {notice&&<div className="hint">{notice}</div>}
-      <button className="primary wide" type="submit" disabled={busy}><ShieldCheck size={18}/>{busy?"Working...":register?"Register member":"Verify and sign in"}</button>
+      <button className="primary wide" type="submit" disabled={busy}><ShieldCheck size={18}/>{busy?"Working...":register?"Register member":"Sign in"}</button>
     </form>
-    {!register&&<button className="secondary wide" onClick={resend} disabled={busy}>Resend OTP verification</button>}
+    {!register&&<button type="button" className="textBtn forgotPasswordBtn" onClick={()=>{setForgot(true);setError("");setNotice("");}}>Forgot password?</button>}
     <button className="secondary wide adminRegisterBtn" onClick={()=>{setRegister(!register);setError("");setNotice("");}}><ShieldCheck size={18}/>{register?"Back to sign in":"Register"}</button>
   </div></div>;
 }
@@ -517,7 +535,7 @@ function ProfileEditor({staffProfile,storeCode,userRole,onSave,onCheckHealth}) {
     <label>Email address</label>
     <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="name@example.com"/>
     <label>Account status</label>
-    <p className="hint">{staffProfile?.status==="active"?"Verified":staffProfile?.status==="disabled"?"Disabled":"Pending OTP verification"}</p>
+    <p className="hint">{staffProfile?.status==="active"?"Active":staffProfile?.status==="disabled"?"Disabled":"Pending"}</p>
     {status&&<p className="hint">{status}</p>}
     <button className="secondary wide" onClick={save} disabled={busy}><UserCircle size={18}/>{busy?"Saving...":"Save profile"}</button>
     <button className="textBtn" onClick={async()=>{const r=await onCheckHealth(); setStatus(r.message);}}>Check database connection</button>
