@@ -45,7 +45,7 @@ export const authEmailFor = (storeCode, staffNumber) =>
 
 // Requirement: "firebase database error checking". Raw Firebase codes mean nothing to
 // staff on a shop floor, so every failure path gets a readable message.
-export function friendlyError(error, context) {
+export function friendlyError(error) {
 	const code = error?.code || "";
 	const map = {
 	"auth/invalid-credential": "Staff number or password is incorrect.",
@@ -57,9 +57,7 @@ export function friendlyError(error, context) {
 	"auth/weak-password": "Password must be at least 6 characters.",
 	"auth/operation-not-allowed": "Email/password sign-in is not enabled. In Firebase Console open Authentication > Sign-in method and enable Email/Password.",
 	"auth/network-request-failed": "Network problem. Check your connection and try again.",
-	"permission-denied": context === "registration"
-	? "Registration was blocked by the database rules. Deploy the updated firestore.rules, and make sure a config/registration document exists with a setupKey field."
-	: "You do not have permission for that action. Check your store access.",
+	"permission-denied": "You do not have permission for that action. Check your store access.",
 	"unavailable": "Cannot reach the database. Check your connection.",
 	"failed-precondition": "The database needs an index for this query. Contact your administrator.",
 	"not-found": "That record no longer exists."
@@ -89,7 +87,7 @@ export async function signInWithStaff(staffNumber, password) {
 	// The store code is part of the derived email, so find the staff record first.
 	const matches = await getDocs(query(collection(db, "staff"), where("staffNumber", "==", number), limit(2)));
 	if (matches.empty) throw new Error("No account found for that staff number.");
-	if (matches.size > 1) throw new Error("This staff number exists in more than one store. Ask an administrator to fix the duplicate.");
+	if (matches.size > 1) throw new Error("This staff number exists in more than one store. Ask a manager to fix the duplicate.");
 
 	const profile = { id: matches.docs[0].id, ...matches.docs[0].data() };
 	if (profile.status === "disabled") throw new Error("This staff account has been disabled.");
@@ -158,7 +156,7 @@ export const logOut = () => signOut(auth);
  * Creates the Auth credential (which triggers the verification OTP email), writes the
  * staff document, and enrols them in their store.
  */
-export async function registerStaffMember(member, setupKey) {
+export async function registerStaffMember(member) {
 	if (!auth || !db) throw new Error("Firebase is not configured.");
 	const storeCode = String(member.storeCode || "").trim();
 	const staffNumber = String(member.staffNumber || "").trim().toUpperCase();
@@ -167,20 +165,11 @@ export async function registerStaffMember(member, setupKey) {
 	if (!staffNumber) throw new Error("A staff number is required.");
 	if (!email) throw new Error("An email address is required.");
 	if (!member.password || member.password.length < 6) throw new Error("Password must be at least 6 characters.");
-	if (!setupKey?.trim()) throw new Error("Admin setup key is required.");
+
+	// Only two roles exist. Anything else falls back to staff.
+	const role = member.role === "manager" ? "manager" : "staff";
 
 	const docId = staffDocId(storeCode, staffNumber);
-
-	// The setup key is validated against a config document and never stored on the
-	// staff record, so it cannot be read back out of the database.
-	let keyDoc;
-	try {
-	keyDoc = await getDoc(doc(db, "config", "registration"));
-	} catch (error) {
-	throw new Error(friendlyError(error, "registration"));
-	}
-	if (!keyDoc.exists()) throw new Error("Registration is not configured. Ask an administrator to set the setup key.");
-	if (String(keyDoc.data().setupKey || "") !== setupKey.trim()) throw new Error("That admin setup key is not valid.");
 
 	// Creating the Auth user triggers the verification (OTP) email.
 	let credential;
@@ -198,7 +187,7 @@ export async function registerStaffMember(member, setupKey) {
 	storeName: storeNameFor(storeCode),
 	phoneNumber: String(member.phoneNumber || "").replace(/\D/g, ""),
 	email,
-	role: member.role || "staff",
+	role,
 	status: "pending",
 		authUid: credential.user.uid,
 	createdAt: serverTimestamp()
@@ -212,7 +201,7 @@ export async function registerStaffMember(member, setupKey) {
 	} catch (error) {
 	// Don't leave an orphaned Auth credential if the Firestore write failed.
 	await signOut(auth).catch(() => {});
-	throw new Error(friendlyError(error, "registration"));
+	throw new Error(friendlyError(error));
 	}
 	return { id: docId, staffNumber, storeCode, email };
 }

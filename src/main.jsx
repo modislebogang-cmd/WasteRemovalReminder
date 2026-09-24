@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+﻿﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Html5Qrcode } from "html5-qrcode";
 import {
@@ -210,7 +210,7 @@ function App() {
       setUserRole(profile.role || "staff");
       setStoreCode(profile.storeCode || "");
     }}
-    onRegister={async (member, setupKey) => { await registerStaffMember(member, setupKey); }}
+    onRegister={async (member) => { await registerStaffMember(member); }}
     onResendOtp={async (staffNumber, password) => resendVerificationOtp(staffNumber, password)}
   />;
   if (!storeCode) return <StoreMissingView profile={staffProfile} onSignOut={logOut} />;
@@ -223,9 +223,9 @@ function App() {
         </div>
         <div className="topActions">
           <button className="iconBtn" onClick={async()=>{ if("Notification" in window) await Notification.requestPermission(); }} title="Enable notifications"><Bell size={19}/></button>
-          {(userRole === "manager" || userRole === "admin") && <div className="roleSelector">
+          {userRole === "manager" && <div className="roleSelector">
             <select value={userRole} onChange={e=>{setUserRole(e.target.value); recordActivity("role_changed", `Changed to ${e.target.value}`);}} className="roleSelect">
-              <option value="staff">Staff</option><option value="manager">Manager</option><option value="admin">Admin</option>
+              <option value="staff">Staff</option><option value="manager">Manager</option>
             </select>
           </div>}
           <button className={`userChip avatarVariant${avatarVariant}`} onClick={()=>setTab("settings")} aria-label="Open user settings"><span>{(user || "U")[0].toUpperCase()}</span></button>
@@ -286,7 +286,7 @@ function App() {
             <div><p className="eyebrow">INVENTORY</p><h1>Tracked products</h1></div>
             <div style={{display:"flex",gap:"10px"}}>
               <button className="primary" onClick={()=>setShowScanner(true)}><ScanLine size={18}/> Scan product</button>
-              {(userRole === "manager" || userRole === "admin") && <button className="secondary" onClick={() => exportToCSV(filtered, user, recordActivity)}><Download size={18}/> Export CSV</button>}
+              {userRole === "manager" && <button className="secondary" onClick={() => exportToCSV(filtered, user, recordActivity)}><Download size={18}/> Export CSV</button>}
             </div>
           </div>
           <div className="search"><Search size={18}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search product or barcode..."/></div>
@@ -335,7 +335,7 @@ function App() {
             <button className="textBtn" onClick={logOut}><LogOut size={16}/> Sign out</button>
             <label>User Role</label>
             <p className="hint">{userRole.charAt(0).toUpperCase() + userRole.slice(1)}</p>
-            {(userRole === "manager" || userRole === "admin") && (
+            {userRole === "manager" && (
               <>
                 <label style={{marginTop:"20px"}}>Manage Categories</label>
                 <div className="categoryList">
@@ -397,7 +397,7 @@ function AuthView({onSignIn,onRegister,onResendOtp}) {
   const [staffNumber,setStaffNumber]=useState(""); const [password,setPassword]=useState("");
   const [phoneNumber,setPhoneNumber]=useState(""); const [email,setEmail]=useState("");
   const [storeCode,setStoreCode]=useState(""); const [role,setRole]=useState("staff");
-  const [setupKey,setSetupKey]=useState(""); const [register,setRegister]=useState(false);
+  const [register,setRegister]=useState(false);
   const [error,setError]=useState(""); const [notice,setNotice]=useState(""); const [busy,setBusy]=useState(false);
 
   const submit=async e=>{
@@ -409,8 +409,8 @@ function AuthView({onSignIn,onRegister,onResendOtp}) {
         if(!storeCode){setError("Please select your store.");return;}
         if(!email.trim()){setError("An email address is required for OTP verification.");return;}
         if(password.length<6){setError("Password must be at least 6 characters.");return;}
-        await onRegister({staffNumber,phoneNumber,storeCode,role,email,password},setupKey);
-        setRegister(false); setPassword(""); setSetupKey("");
+        await onRegister({staffNumber,phoneNumber,storeCode,role,email,password});
+        setRegister(false); setPassword("");
         setNotice(`Registration submitted for ${staffNumber.toUpperCase()}. Check ${email} for the OTP verification link, then sign in.`);
       } else {
         await onSignIn(staffNumber,password);
@@ -444,8 +444,7 @@ function AuthView({onSignIn,onRegister,onResendOtp}) {
       </>}
       <label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} required minLength={register?6:undefined}/></label>
       {register&&<>
-        <label>Role<select value={role} onChange={e=>setRole(e.target.value)} className="filterSelect"><option value="staff">Staff</option><option value="manager">Manager</option><option value="admin">Admin</option></select></label>
-        <label>Admin setup key<input type="password" value={setupKey} onChange={e=>setSetupKey(e.target.value)} required/></label>
+        <label>Role<select value={role} onChange={e=>setRole(e.target.value)} className="filterSelect"><option value="staff">Staff</option><option value="manager">Manager</option></select></label>
       </>}
       {error&&<div className="error">{error}</div>}
       {notice&&<div className="hint">{notice}</div>}
@@ -506,7 +505,7 @@ function StoreMissingView({profile,onSignOut}) {
   return <div className="modalBackdrop"><div className="modal">
     <p className="eyebrow">STORE MANAGEMENT</p>
     <h2>No store assigned</h2>
-    <p className="hint">Your staff record{profile?.staffNumber?` (${profile.staffNumber})`:""} is not linked to a store. Ask an administrator to assign you to 3156-Groblersdal or 3138-Jean Crossing, then sign in again.</p>
+    <p className="hint">Your staff record{profile?.staffNumber?` (${profile.staffNumber})`:""} is not linked to a store. Ask a manager to assign you to 3156-Groblersdal or 3138-Jean Crossing, then sign in again.</p>
     <button className="textBtn" onClick={onSignOut}><LogOut size={16}/> Sign out</button>
   </div></div>;
 }
@@ -573,11 +572,11 @@ function AddModal({barcode,onClose,onSave}) {
 /**
  * Requirements 3 and 6.
  * The Activity menu holds the waste-removal history for every role, plus a store
- * performance panel for managers and admins.
+ * performance panel for managers.
  */
 function ActivityView({activities,removals,analyticsDays,storeCode,storeName,userRole,currentStaffNumber}) {
   const [pane,setPane]=useState("removals");
-  const isManager = userRole === "manager" || userRole === "admin";
+  const isManager = userRole === "manager";
 
   // Requirement 3: store performance in waste removal.
   const analytics = useMemo(()=>{

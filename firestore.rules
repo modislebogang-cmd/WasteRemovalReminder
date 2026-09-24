@@ -31,33 +31,22 @@ service cloud.firestore {
         : "";
     }
 
-    function isManager() { return myRole() in ['manager', 'admin']; }
-    function isAdmin() { return myRole() == 'admin'; }
-
-    /* ------------------------------------------------------------- config --- */
-    // Holds the registration setup key. Registration runs BEFORE the caller has an
-    // auth account (the credential is created after this check), so this read must
-    // be allowed to unauthenticated callers. It is never writable from the client.
-    match /config/{docId} {
-      allow read: if true;
-      allow write: if false;
-    }
+    function isManager() { return myRole() == 'manager'; }
 
     /* -------------------------------------------------------------- staff --- */
     match /staff/{staffDocId} {
-      // Staff may read their own record. Managers and admins may read all staff.
+      // Staff may read their own record. Managers may read all staff.
       allow read: if signedIn() && (resource.data.authUid == request.auth.uid || isManager());
 
       // A new registration may only create its own record, and it must start as
-      // "pending" so it cannot self-promote to admin. The setup key is never stored.
+      // "pending" so it cannot self-promote its role.
       allow create: if signedIn()
         && request.resource.data.authUid == request.auth.uid
         && request.resource.data.status == 'pending'
-        && request.resource.data.role in ['staff', 'manager']
-        && !request.resource.data.keys().hasAny(['setupKey']);
+        && request.resource.data.role in ['staff', 'manager'];
 
       // A staff member may update only their own contact/profile fields.
-      // Role, store and status promotion are admin-only.
+      // Role, store and status changes are manager-only.
       allow update: if signedIn() && (
         (
           resource.data.authUid == request.auth.uid
@@ -66,10 +55,10 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys()
                .hasOnly(['displayName', 'phoneNumber', 'email', 'settings', 'authUid', 'lastLoginAt', 'status', 'updatedAt'])
         )
-        || isAdmin()
+        || isManager()
       );
 
-      allow delete: if isAdmin();
+      allow delete: if isManager();
     }
 
     /* ------------------------------------------------------------- stores --- */
