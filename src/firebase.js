@@ -45,7 +45,7 @@ export const authEmailFor = (storeCode, staffNumber) =>
 
 // Requirement: "firebase database error checking". Raw Firebase codes mean nothing to
 // staff on a shop floor, so every failure path gets a readable message.
-export function friendlyError(error) {
+export function friendlyError(error, context) {
 	const code = error?.code || "";
 	const map = {
 	"auth/invalid-credential": "Staff number or password is incorrect.",
@@ -55,8 +55,11 @@ export function friendlyError(error) {
 	"auth/too-many-requests": "Too many attempts. Wait a few minutes and try again.",
 	"auth/email-already-in-use": "That staff number is already registered.",
 	"auth/weak-password": "Password must be at least 6 characters.",
+	"auth/operation-not-allowed": "Email/password sign-in is not enabled. In Firebase Console open Authentication > Sign-in method and enable Email/Password.",
 	"auth/network-request-failed": "Network problem. Check your connection and try again.",
-	"permission-denied": "You do not have permission for that action. Check your store access.",
+	"permission-denied": context === "registration"
+	? "Registration was blocked by the database rules. Deploy the updated firestore.rules, and make sure a config/registration document exists with a setupKey field."
+	: "You do not have permission for that action. Check your store access.",
 	"unavailable": "Cannot reach the database. Check your connection.",
 	"failed-precondition": "The database needs an index for this query. Contact your administrator.",
 	"not-found": "That record no longer exists."
@@ -174,7 +177,7 @@ export async function registerStaffMember(member, setupKey) {
 	try {
 	keyDoc = await getDoc(doc(db, "config", "registration"));
 	} catch (error) {
-	throw new Error(friendlyError(error));
+	throw new Error(friendlyError(error, "registration"));
 	}
 	if (!keyDoc.exists()) throw new Error("Registration is not configured. Ask an administrator to set the setup key.");
 	if (String(keyDoc.data().setupKey || "") !== setupKey.trim()) throw new Error("That admin setup key is not valid.");
@@ -209,7 +212,7 @@ export async function registerStaffMember(member, setupKey) {
 	} catch (error) {
 	// Don't leave an orphaned Auth credential if the Firestore write failed.
 	await signOut(auth).catch(() => {});
-	throw new Error(friendlyError(error));
+	throw new Error(friendlyError(error, "registration"));
 	}
 	return { id: docId, staffNumber, storeCode, email };
 }

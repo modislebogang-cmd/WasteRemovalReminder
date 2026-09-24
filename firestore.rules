@@ -6,13 +6,17 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function myStaffDoc() {
-      return /databases/$(database)/documents/staff/$(request.auth.uid);
+    // get()/exists() require a fully specified literal path. The documented pattern
+    // inlines it rather than returning a path from a helper function, so these are
+    // written out in full at each call site.
+    function staffDocExists() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/staff/$(request.auth.uid));
     }
 
     function myStoreCode() {
-      return signedIn() && exists(myStaffDoc())
-        ? get(myStaffDoc()).data.storeCode
+      return staffDocExists()
+        ? get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.storeCode
         : "";
     }
 
@@ -22,8 +26,8 @@ service cloud.firestore {
     }
 
     function myRole() {
-      return signedIn() && exists(myStaffDoc())
-        ? get(myStaffDoc()).data.role
+      return staffDocExists()
+        ? get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.role
         : "";
     }
 
@@ -31,10 +35,11 @@ service cloud.firestore {
     function isAdmin() { return myRole() == 'admin'; }
 
     /* ------------------------------------------------------------- config --- */
-    // Holds the registration setup key. Readable by any signed-in user so the client
-    // can validate it during registration, but never writable from the client.
+    // Holds the registration setup key. Registration runs BEFORE the caller has an
+    // auth account (the credential is created after this check), so this read must
+    // be allowed to unauthenticated callers. It is never writable from the client.
     match /config/{docId} {
-      allow read: if signedIn();
+      allow read: if true;
       allow write: if false;
     }
 
@@ -94,7 +99,6 @@ service cloud.firestore {
 
       match /analyticsDaily/{dayId} {
         allow read: if myStore(storeCode);
-        // Written by the client as part of recordRemoval; increments only.
         allow create, update: if myStore(storeCode);
       }
 
