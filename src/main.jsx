@@ -2,34 +2,47 @@
 import { createRoot } from "react-dom/client";
 import { Html5Qrcode } from "html5-qrcode";
 import {
-  Bell, Camera, CheckCircle2, ChevronRight, Clock3, Package,
+  Bell, CheckCircle2, ChevronRight, Clock3, Package,
   Plus, Search, Settings, Trash2, X, AlertTriangle, CalendarDays,
-  LayoutDashboard, ScanLine, ListChecks, Download, Eye, LogOut, Activity, Filter, Store, UserCircle, ShieldCheck, Send, Save
+  LayoutDashboard, ScanLine, ListChecks, Download, LogOut, Activity, UserCircle, ShieldCheck, Send, Save
 } from "lucide-react";
 import {
   firebaseEnabled, watchAuth, signInWithStaff, getStaffProfile, registerStaffMember, saveUserSettings, logOut,
   STORES, storeNameFor, watchStore, addSharedProduct, updateSharedProduct, addActivity, saveStoreCategories,
   addStoreAlert, recordRemoval, watchRemovals, watchDailyAnalytics, updateStaffProfile, checkDatabaseHealth,
   resendVerificationOtp, friendlyError
-} from "./firebase";
-import "./styles.css";
+} from "./firebase";import "./styles.css";
 
-const todayISO = () => {
-  const d = new Date();
-  d.setHours(0,0,0,0);
-  return d.toISOString().slice(0,10);
+// The staff document is keyed by store + staff number, neither of which is known on
+// a fresh page load. Remembering them locally lets the signed-in user read their own
+// document directly, instead of querying `staff` by authUid — a query the Firestore
+// rules cannot prove is permitted, which surfaces as "Missing or insufficient
+// permissions". This is a cache of identifiers only, not of credentials.
+const STAFF_CACHE_KEY = "rwr.staffKey";
+const readCachedStaff = () => {
+  try {
+    const raw = window.localStorage.getItem(STAFF_CACHE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
 };
+const writeCachedStaff = (value) => {
+  try {
+    window.localStorage.setItem(STAFF_CACHE_KEY, JSON.stringify(value));
+  } catch {
+    /* storage unavailable — sign-in still works, it just re-resolves each load */
+  }
+};
+const clearCachedStaff = () => {
+  try { window.localStorage.removeItem(STAFF_CACHE_KEY); } catch { /* ignore */ }
+};
+
 const daysUntil = (date) => {
   const a = new Date(); a.setHours(0,0,0,0);
   const b = new Date(date); b.setHours(0,0,0,0);
   return Math.round((b-a)/86400000);
 };
-const initialProducts = [
-  {id: "1", barcode:"6001234567890", name:"Fresh Milk 2L", expiry: todayISO(), category:"Dairy", status:"active"},
-  {id: "2", barcode:"6009876543210", name:"Greek Yoghurt", expiry:new Date(Date.now()+86400000).toISOString().slice(0,10), category:"Dairy", status:"active"},
-  {id: "3", barcode:"6005554443332", name:"Chicken Fillets", expiry:new Date(Date.now()+3*86400000).toISOString().slice(0,10), category:"Meat", status:"active"},
-];
-
 const defaultCategories = ["Dairy", "Meat", "Bakery", "Beverages", "Frozen", "General"];
 const defaultAlertSettings = { push: false, dailySummary: true, summaryTime: "08:00", reminderDays: 1, escalateAfterHours: 4 };
 
@@ -72,16 +85,22 @@ function App() {
         setAnalyticsDays([]);
         setCategories(defaultCategories);
         setAlertSettings(defaultAlertSettings);
+        clearCachedStaff();
         return;
       }
       try {
-        const profile = await getStaffProfile(currentUser.uid);
+        // The staff document ID is derived from store + staff number, which are not
+        // known until we read the record. A `where` query on authUid cannot be proved
+        // against the rules, so the resolved id is cached locally after sign-in.
+        const cached = readCachedStaff();
+        const profile = await getStaffProfile(currentUser.uid, cached?.storeCode, cached?.staffNumber);
         if (profile) {
           setStaffProfile(profile);
           setUser(profile.staffNumber);
           setUserRole(profile.role || "staff");
           setStoreCode(profile.storeCode || "");
           setAlertSettings({ ...defaultAlertSettings, ...(profile.settings || {}) });
+          writeCachedStaff({ storeCode: profile.storeCode, staffNumber: profile.staffNumber });
         }
       } catch (error) {
         setSyncError(friendlyError(error));
@@ -205,10 +224,15 @@ function App() {
   if (!firebaseUser || !user) return <AuthView
     onSignIn={async (staffNumber, password) => {
       const profile = await signInWithStaff(staffNumber, password);
+      // Cache the identifiers so the next page load can read this staff document
+      // directly, instead of querying `staff` by authUid (which the rules cannot
+      // prove is permitted).
+      writeCachedStaff({ storeCode: profile.storeCode, staffNumber: profile.staffNumber });
       setStaffProfile(profile);
       setUser(profile.staffNumber);
       setUserRole(profile.role || "staff");
       setStoreCode(profile.storeCode || "");
+      setAlertSettings({ ...defaultAlertSettings, ...(profile.settings || {}) });
     }}
     onRegister={async (member) => { await registerStaffMember(member); }}
     onResendOtp={async (staffNumber, password) => resendVerificationOtp(staffNumber, password)}
@@ -546,7 +570,7 @@ function ScannerModal({onClose,onScanned}) {
         window.setTimeout(() => onScanned(text), 450);
       },
       ()=>{}
-    ).catch(e=>setError("Camera access was blocked. Allow camera permission or add the barcode manually."));
+    ).catch(()=>setError("Camera access was blocked. Allow camera permission or add the barcode manually."));
     return ()=>{ if(scannerRef.current?.isScanning) scannerRef.current.stop().catch(()=>{}); };
   },[]);
   return <div className="modalBackdrop"><div className="modal scannerModal">

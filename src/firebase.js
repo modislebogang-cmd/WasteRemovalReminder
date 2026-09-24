@@ -84,68 +84,118 @@ export async function signInWithStaff(staffNumber, password) {
 	if (!number) throw new Error("Enter your staff number.");
 	if (!password) throw new Error("Enter your password.");
 
-	// The store code is part of the derived email, so find the staff record first.
-	const matches = await getDocs(query(collection(db, "staff"), where("staffNumber", "==", number), limit(2)));
-	if (matches.empty) throw new Error("No account found for that staff number.");
-	if (matches.size > 1) throw new Error("This staff number exists in more than one store. Ask a manager to fix the duplicate.");
+	// The store code is part of the derived credential, but the user only types a
+	// staff number. The store list is fixed and small, so each store's derived
+	// address is attempted in turn. This keeps ALL Firestore reads behind
+	// authentication — querying `staff` before sign-in is denied by the rules
+	// (staff docs are only readable by their owner), which surfaces to the user as
+	// "Missing or insufficient permissions".
+	const { credential, storeCode } = await signInAcrossStores(number, password);
 
-	const profile = { id: matches.docs[0].id, ...matches.docs[0].data() };
-	if (profile.status === "disabled") throw new Error("This staff account has been disabled.");
+	// From here the caller is authenticated, so staff reads are permitted.
+	if (!credential.user.emailVerified) {
+	await signOut(auth);
+	throw new Error("Verify your account using the OTP link sent to your email, then sign in again.");
+	}
 
-	let credential;
+	const docId = staffDocId(storeCode, number);
+	let profile;
 	try {
-	credential = await signInWithEmailAndPassword(auth, authEmailFor(profile.storeCode, number), password);
+	const snapshot = await getDoc(doc(db, "staff", docId));
+	profile = snapshot.exists() ? { id: snapshot.id, ...snapshot.data() } : null;
 	} catch (error) {
+	await signOut(auth);
 	throw new Error(friendlyError(error));
 	}
 
-	// Requirement 0.5: the emailed OTP link must be followed before entry.
-	if (!credential.user.emailVerified) {
+	if (!profile) {
 	await signOut(auth);
-	const error = new Error("Verify your account using the OTP link sent to your email, then sign in again.");
-		error.code = "auth/email-not-verified";
-	throw error;
+	throw new Error("Your staff record is missing. Ask a manager to re-register you.");
+	}
+	if (profile.status === "disabled") {
+	await signOut(auth);
+	throw new Error("This staff account has been disabled.");
 	}
 
-	await setDoc(doc(db, "staff", profile.id), {
+	try {
+	await setDoc(doc(db, "staff", docId), {
 		authUid: credential.user.uid,
 	status: "active",
 	lastLoginAt: serverTimestamp()
 	}, { merge: true });
+	} catch {
+	// The account is usable even if this bookkeeping write is refused, so don't
+	// block sign-in on it.
+	}
+
 	return { ...profile, authUid: credential.user.uid, status: "active" };
+}
+
+// Signs in across the fixed store list, returning the first successful credential
+// and the store code it matched. Avoids any Firestore read while unauthenticated.
+async function signInAcrossStores(staffNumber, password) {
+	let lastError = null;
+	for (const store of STORES) {
+	try {
+	const credential = await signInWithEmailAndPassword(auth, authEmailFor(store.code, staffNumber), password);
+	return { credential, storeCode: store.code };
+	} catch (error) {
+		lastError = error;
+		// Only a bad credential means try the next store. Anything else is terminal.
+		if (error?.code !== "auth/invalid-credential" && error?.code !== "auth/user-not-found") {
+			throw new Error(friendlyError(error));
+		}
+	}
+	}
+	throw new Error(friendlyError(lastError));
 }
 
 // Re-send the verification OTP for an account that hasn't confirmed yet.
 export async function resendVerificationOtp(staffNumber, password) {
 	if (!auth || !db) throw new Error("Firebase is not configured.");
 	const number = String(staffNumber || "").trim().toUpperCase();
-	const matches = await getDocs(query(collection(db, "staff"), where("staffNumber", "==", number), limit(2)));
-	if (matches.empty) throw new Error("No account found for that staff number.");
-	const profile = matches.docs[0].data();
-	try {
-	const credential = await signInWithEmailAndPassword(auth, authEmailFor(profile.storeCode, number), password);
+	if (!number) throw new Error("Enter your staff number.");
+	const { credential } = await signInAcrossStores(number, password);
 	if (credential.user.emailVerified) { await signOut(auth); return false; }
 	await sendEmailVerification(credential.user);
 	await signOut(auth);
 	return true;
-	} catch (error) {
-	throw new Error(friendlyError(error));
-	}
 }
 
 export const sendStaffPasswordReset = async (staffNumber) => {
 	if (!auth || !db) throw new Error("Firebase is not configured.");
 	const number = String(staffNumber || "").trim().toUpperCase();
-	const matches = await getDocs(query(collection(db, "staff"), where("staffNumber", "==", number), limit(2)));
-	if (matches.empty) throw new Error("No account found for that staff number.");
-	await sendPasswordResetEmail(auth, authEmailFor(matches.docs[0].data().storeCode, number));
+	if (!number) throw new Error("Enter your staff number.");
+	// The staff number alone may exist in either store, so send a reset link to each
+	// derived address that resolves. Only addresses matching a real account succeed.
+	let sent = false;
+	for (const store of STORES) {
+		try {
+			await sendPasswordResetEmail(auth, authEmailFor(store.code, number));
+			sent = true;
+		} catch (error) {
+			if (error?.code !== "auth/user-not-found" && error?.code !== "auth/invalid-email") {
+				throw new Error(friendlyError(error));
+			}
+		}
+	}
+	if (!sent) throw new Error("No account found for that staff number.");
 };
 
-export async function getStaffProfile(authUid) {
-	if (!db) return null;
-	const matches = await getDocs(query(collection(db, "staff"), where("authUid", "==", authUid), limit(1)));
-	const staff = matches.docs[0];
-	return staff ? { id: staff.id, ...staff.data() } : null;
+export async function getStaffProfile(authUid, storeCode, staffNumber) {
+	if (!db || !authUid) return null;
+	// A signed-in caller may read their own staff document, but the rules can only
+	// verify a DIRECT document read (resource.data.authUid == request.auth.uid).
+	// A `where` query is evaluated before the rules filter, so Firestore cannot
+	// prove every possible result is permitted and rejects it with "Missing or
+	// insufficient permissions". Therefore only the direct read is used.
+	if (!storeCode || !staffNumber) return null;
+	const snapshot = await getDoc(doc(db, "staff", staffDocId(storeCode, staffNumber)));
+	if (!snapshot.exists()) return null;
+	const data = snapshot.data();
+	// Guard against a stale local cache pointing at somebody else's record.
+	if (data.authUid && data.authUid !== authUid) return null;
+	return { id: snapshot.id, ...data };
 }
 
 export const updateUserProfile = (user, data) => updateProfile(user, data);
