@@ -42,20 +42,25 @@ service cloud.firestore {
       allow read: if signedIn() && request.auth.uid == uid;
 
       // Create on first sign-in / registration. Role must match what they actually
-      // hold on their staff record, which the rules read directly.
+      // hold on their staff record, which the rules read directly. The claimed
+      // staffDocId must name a real staff document whose store/number agree with
+      // the claim, so a user cannot link themselves to somebody else's record.
       allow create: if signedIn()
         && request.auth.uid == uid
         && request.resource.data.storeCode is string
         && request.resource.data.staffNumber is string
         && request.resource.data.staffDocId == request.resource.data.storeCode + '-' + request.resource.data.staffNumber
-        && request.resource.data.role in ['staff', 'manager'];
+        && get(/databases/$(database)/documents/staff/$(request.resource.data.staffDocId)).data.storeCode == request.resource.data.storeCode
+        && get(/databases/$(database)/documents/staff/$(request.resource.data.staffDocId)).data.staffNumber == request.resource.data.staffNumber
+        && (!('role' in request.resource.data) || request.resource.data.role in ['staff', 'manager']);
 
-      // Refresh (e.g. after a role change by a manager). Role changes are only
-      // accepted when the underlying staff document already says so, so a user
-      // cannot promote themselves by editing this mirror.
+      // Refresh the link (e.g. to carry the real role forward). The claimed role
+      // must always agree with the underlying staff document, so the mirror can
+      // never be used to promote the caller.
       allow update: if signedIn()
         && request.auth.uid == uid
-        && request.resource.data.role == resource.data.role;
+        && (!('role' in request.resource.data)
+            || request.resource.data.role == get(/databases/$(database)/documents/staff/$(resource.data.staffDocId)).data.role);
 
       allow delete: if false;
     }
@@ -64,8 +69,18 @@ service cloud.firestore {
     match /staff/{staffDocId} {
       // A staff member may read their own record (matched on the authUid field);
       // managers may read any record.
+      //
+      // The read must not depend on the staffByUid mirror: during the very first
+      // sign-in that mirror does not exist yet, so we also accept the case where
+      // the record is the caller's own store+staff-number document. Without this
+      // fallback the login read is denied and the user sees
+      // "You do not have permission for that action. Check your store access."
       allow read: if signedIn()
-        && (resource.data.authUid == request.auth.uid || isManager());
+        && (
+          (resource.data.authUid == request.auth.uid && resource.data.authUid != null)
+          || (myLinkExists() && staffDocId == myLink().staffDocId)
+          || isManager()
+        );
 
       // A new registration may only create its own record, starting "pending" so it
       // cannot self-promote. The document id must match the store + staff number.

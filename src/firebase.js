@@ -57,7 +57,7 @@ export function friendlyError(error) {
 	"auth/weak-password": "Password must be at least 6 characters.",
 	"auth/operation-not-allowed": "Email/password sign-in is not enabled. In Firebase Console open Authentication > Sign-in method and enable Email/Password.",
 	"auth/network-request-failed": "Network problem. Check your connection and try again.",
-	"permission-denied": "You do not have permission for that action. Check your store access.",
+	"permission-denied": "You do not have permission for that action. Check your store access (if this happens at sign-in, the Firestore rules for this project have not been deployed yet — run: firebase deploy --only firestore).",
 	"unavailable": "Cannot reach the database. Check your connection.",
 	"failed-precondition": "The database needs an index for this query. Contact your administrator.",
 	"not-found": "That record no longer exists."
@@ -94,7 +94,26 @@ export async function signInWithStaff(staffNumber, password) {
 
 	// From here the caller is authenticated, so staff reads are permitted.
 	const docId = staffDocId(storeCode, number);
+
+	// Write the uid -> store mirror BEFORE reading the staff document. Every
+	// store-scoped rule resolves the caller through this document, and the staff
+	// read itself accepts the mirror as proof of ownership. If this write is
+	// skipped (or fails silently) the user is left authenticated but with no store
+	// link, and every later read is denied with "Missing or insufficient
+	// permissions" — the exact symptom on the login screen. It is therefore
+	// attempted first and its failure is surfaced rather than swallowed.
 	let profile;
+	try {
+		await setDoc(doc(db, "staffByUid", credential.user.uid), {
+			staffDocId: docId,
+			storeCode,
+			staffNumber: number
+		}, { merge: true });
+	} catch (error) {
+		await signOut(auth);
+		throw new Error(friendlyError(error));
+	}
+
 	try {
 	const snapshot = await getDoc(doc(db, "staff", docId));
 	profile = snapshot.exists() ? { id: snapshot.id, ...snapshot.data() } : null;
@@ -123,18 +142,14 @@ export async function signInWithStaff(staffNumber, password) {
 	// block sign-in on it.
 	}
 
-	// Record the uid -> store lookup the security rules rely on. Staff documents are
-	// keyed by store+staffNumber, which the rules cannot resolve from an auth uid, so
-	// this small mirror is what makes store-scoped access provable.
+	// Keep the mirror in step with the role on the staff record. The link was
+	// already created above; this refresh only carries the role forward.
 	try {
 	await setDoc(doc(db, "staffByUid", credential.user.uid), {
-		staffDocId: docId,
-		storeCode,
-		staffNumber: number,
 		role: profile.role === "manager" ? "manager" : "staff"
 	}, { merge: true });
 	} catch {
-	// Non-fatal for the session; the rules may deny store reads until it exists.
+	// Non-fatal for the session.
 	}
 
 	return { ...profile, authUid: credential.user.uid, status: "active" };
