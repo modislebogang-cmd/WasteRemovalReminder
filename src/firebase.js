@@ -213,6 +213,92 @@ export async function getStaffProfile(authUid, storeCode, staffNumber) {
 export const updateUserProfile = (user, data) => updateProfile(user, data);
 export const logOut = () => signOut(auth);
 
+/* ---------------------------------------------------------- notifications --- */
+
+// Browsers expose `new Notification(...)` only on some platforms. On Android
+// Chrome (and several mobile browsers) the constructor exists but is illegal, and
+// calling it throws "Failed to construct 'Notification': Illegal constructor. Use
+// ServiceWorkerRegistration.showNotification() instead." Because that throw used
+// to happen inside a React effect, the error surfaced as the app's error panel on
+// the login screen. Every notification path must therefore go through a page
+// service worker, which is the supported route everywhere.
+const NOTIFICATION_SW_URL = "/notification-sw.js";
+
+export const notificationsSupported = () =>
+	typeof window !== "undefined" && "Notification" in window && "serviceWorker" in navigator;
+
+export function notificationPermission() {
+	if (!notificationsSupported()) return "unsupported";
+	return Notification.permission;
+}
+
+let serviceWorkerPromise = null;
+
+// Registers (once) and returns the page service worker used only to display
+// notifications. Registration is also what Chrome requires before it will allow
+// a notification to be shown at all on Android.
+//
+// `ready` is raced against a timeout because it only settles once a worker is
+// active AND controlling a page. On a first visit that can take a moment, and on
+// some setups it never settles with a headless/automated browser. Registration
+// alone is enough to call showNotification, so a slow `ready` must not block an
+// alert or leave the settings toggle stuck on "Working...".
+export function ensureNotificationServiceWorker() {
+	if (!notificationsSupported()) return Promise.resolve(null);
+	if (!serviceWorkerPromise) {
+		serviceWorkerPromise = navigator.serviceWorker
+			.register(NOTIFICATION_SW_URL, { scope: "/" })
+			.then(registration => Promise.race([
+				navigator.serviceWorker.ready.then(() => registration),
+				new Promise(resolve => setTimeout(() => resolve(registration), 2500))
+			]))
+			.catch(() => null);
+	}
+	return serviceWorkerPromise;
+}
+
+/**
+ * Shows one notification through the service worker.
+ * Returns { shown, reason } rather than throwing, so a notification problem can
+ * never take a screen down with it.
+ */
+export async function showAppNotification(title, options = {}) {
+	if (!notificationsSupported()) return { shown: false, reason: "This browser does not support notifications." };
+	if (Notification.permission !== "granted") return { shown: false, reason: "Notification permission has not been granted." };
+	try {
+		const registration = await ensureNotificationServiceWorker();
+		if (!registration) return { shown: false, reason: "Notifications are unavailable on this browser." };
+		await registration.showNotification(title, {
+			icon: "/Wasteremovalreminder.png",
+			badge: "/Wasteremovalreminder.png",
+			...options
+		});
+		return { shown: true };
+	} catch (error) {
+		return { shown: false, reason: friendlyError(error) };
+	}
+}
+
+/**
+ * Requests notification permission. Returns a clear outcome for the settings UI
+ * instead of a boolean, so the user is told what to do when it is refused or the
+ * browser cannot do it at all.
+ */
+export async function requestNotificationPermission() {
+	if (!notificationsSupported()) return { granted: false, message: "This browser does not support notifications." };
+	try {
+		if (Notification.permission !== "granted") await Notification.requestPermission();
+	} catch {
+		return { granted: false, message: "Notification permission could not be requested on this browser." };
+	}
+	if (Notification.permission !== "granted") {
+		return { granted: false, message: "Notifications are blocked. Allow them for this site in your browser settings, then try again." };
+	}
+	// Prepare the service worker now so the first alert does not have to wait.
+	await ensureNotificationServiceWorker();
+	return { granted: true, message: "" };
+}
+
 /**
  * Requirements 0.1-0.5: register a staff member.
  * Creates the Auth credential, writes the staff document, and enrols them in their store.

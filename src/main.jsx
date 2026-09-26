@@ -12,7 +12,8 @@ import {
   STORES, storeNameFor, watchStore, addSharedProduct, updateSharedProduct, addActivity, saveStoreCategories,
   addStoreAlert, recordRemoval, watchRemovals, watchDailyAnalytics, updateStaffProfile, checkDatabaseHealth,
   sendStaffPasswordReset, friendlyError, STORE_PERFORMANCE_TTL_MS, readCachedStorePerformance,
-  readLiveStorePerformance
+  readLiveStorePerformance, notificationsSupported, notificationPermission,
+  requestNotificationPermission, showAppNotification
 } from "./firebase";
 import "./styles.css";
 
@@ -169,6 +170,11 @@ function App() {
   const [showNotifications, setShowNotifications] = useState(true);
   const [alertSettings, setAlertSettings] = useState(defaultAlertSettings);
   const [avatarVariant] = useState(() => Math.floor(Math.random() * 4));
+  // Tracks the last reminder set that was notified, so live-sync updates don't
+  // repost the same notification on every snapshot.
+  const lastNotifiedRef = useRef("");
+  // Feedback for the bell button, which has no other place to show a message.
+  const [pushNote, setPushNote] = useState("");
   // Requirement 2 + 3 (new): the details popup and the edit form.
   const [detailsId, setDetailsId] = useState("");
   const [showEdit, setShowEdit] = useState(false);
@@ -326,14 +332,24 @@ function App() {
     }
   };
 
+  // Alerts are shown through the page service worker. `new Notification(...)` is an
+  // illegal constructor on mobile browsers, so calling it directly threw
+  // "Failed to construct 'Notification': Illegal constructor" whenever a reminder
+  // existed — which is what surfaced as an unexpected error right after login.
   useEffect(() => {
-    if (!user || !("Notification" in window) || !showNotifications) return;
+    if (!user || !showNotifications || !notificationsSupported()) return;
     const reminders = active.filter(p => daysUntil(p.expiry) <= Number(alertSettings.reminderDays || 0));
-    if (Notification.permission === "granted" && reminders.length) {
-      new Notification("RemoveWasteReminder", {
-        body: reminders.length === 1 ? `${reminders[0].name} needs attention soon.` : `${reminders.length} products need attention soon.`
-      });
-    }
+    if (notificationPermission() !== "granted" || !reminders.length) return;
+    // Key each alert by the set of products it covers, so the same reminder is not
+    // re-posted on every live-sync update, but a changed set does notify again.
+    const signature = `${reminders.length}:${reminders.map(p => p.id).sort().join(",")}`;
+    if (lastNotifiedRef.current === signature) return;
+    lastNotifiedRef.current = signature;
+    showAppNotification("RemoveWasteReminder", {
+      body: reminders.length === 1
+        ? `${reminders[0].name} needs attention soon.`
+        : `${reminders.length} products need attention soon.`
+    });
   }, [user, showNotifications, active, alertSettings.reminderDays]);
 
   if (!firebaseEnabled) return <FirebaseConfigView />;
@@ -366,7 +382,7 @@ function App() {
           <img className="brandLogo" src="/Wasteremovalreminder.png" alt="Waste Removal Reminder" />
         </div>
         <div className="topActions">
-          <button className="iconBtn" onClick={async()=>{ if("Notification" in window) await Notification.requestPermission(); }} title="Enable notifications"><Bell size={19}/></button>
+          <button className="iconBtn" onClick={async()=>{ if(notificationPermission()==="granted"){ setPushNote("Notifications are already on."); return; } const result=await requestNotificationPermission(); setPushNote(result.granted?"Notifications are on.":result.message); }} title="Enable notifications"><Bell size={19}/></button>
           {userRole === "manager" && <div className="roleSelector">
             <select value={userRole} onChange={e=>{setUserRole(e.target.value); recordActivity("role_changed", `Changed to ${e.target.value}`);}} className="roleSelect">
               <option value="staff">Staff</option><option value="manager">Manager</option>
@@ -377,6 +393,7 @@ function App() {
       </header>
 
       <main className="content">
+        {pushNote && <div className="inAppNotification"><Bell size={20}/><div><strong>Notifications</strong><span>{pushNote}</span></div><button onClick={()=>setPushNote("")} className="closeNotif"><X size={16}/></button></div>}
         {syncError && <div className="inAppNotification"><AlertTriangle size={20}/><div><strong>Sync notice</strong><span>{syncError}</span></div><button onClick={() => setSyncError("")} className="closeNotif"><X size={16}/></button></div>}
         {showNotifications && reminderProducts.length > 0 && (
           <div className="inAppNotification">
@@ -496,7 +513,7 @@ function App() {
                 </div>
               </>
             )}
-            <AlertSettings settings={alertSettings} onChange={setAlertSettings} onRequestPush={async()=>{ if(!("Notification" in window)) return "This browser does not support notifications."; const permission=await Notification.requestPermission(); const granted=permission === "granted"; setAlertSettings(current=>({...current,push:granted})); if(granted && staffProfile?.id){ await saveUserSettings(staffProfile.id,{...alertSettings,push:true}); } recordActivity("push_notifications_enabled", granted?"Push notifications enabled":"Push permission not granted"); return granted?"" : "Notifications are blocked. Allow notifications for this site in your browser settings, then try again."; }} onDisablePush={async()=>{ setAlertSettings(current=>({...current,push:false})); if(staffProfile?.id){ await saveUserSettings(staffProfile.id,{...alertSettings,push:false}); } recordActivity("push_notifications_disabled","Push notifications turned off"); }} onSave={async next=>{if(staffProfile?.id) await saveUserSettings(staffProfile.id,next);recordActivity("alert_settings_updated",`Alerts ${next.dailySummary?"enabled":"disabled"}`)}} onEscalate={async message=>{if(firebaseEnabled && firebaseUser && storeCode) await addStoreAlert(storeCode,{message,from:user,type:"manager_escalation",status:"open"});recordActivity("manager_escalation",message)}} />
+            <AlertSettings settings={alertSettings} onChange={setAlertSettings} onRequestPush={async()=>{ const result=await requestNotificationPermission(); setAlertSettings(current=>({...current,push:result.granted})); if(result.granted && staffProfile?.id){ await saveUserSettings(staffProfile.id,{...alertSettings,push:true}); } recordActivity("push_notifications_enabled", result.granted?"Push notifications enabled":"Push permission not granted"); return result.granted?"" : result.message; }} onDisablePush={async()=>{ setAlertSettings(current=>({...current,push:false})); if(staffProfile?.id){ await saveUserSettings(staffProfile.id,{...alertSettings,push:false}); } recordActivity("push_notifications_disabled","Push notifications turned off"); }} onSave={async next=>{if(staffProfile?.id) await saveUserSettings(staffProfile.id,next);recordActivity("alert_settings_updated",`Alerts ${next.dailySummary?"enabled":"disabled"}`)}} onEscalate={async message=>{if(firebaseEnabled && firebaseUser && storeCode) await addStoreAlert(storeCode,{message,from:user,type:"manager_escalation",status:"open"});recordActivity("manager_escalation",message)}} />
             <p className="hint">Staff can scan products and manage removals. Managers can view activity, export reports, and manage categories.</p>
           </div>
         </section>}
