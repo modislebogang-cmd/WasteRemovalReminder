@@ -1,4 +1,4 @@
-﻿﻿﻿import React, { useEffect, useMemo, useRef, useState } from "react";
+﻿﻿﻿import React, { Component, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Html5Qrcode } from "html5-qrcode";
 import {
@@ -48,6 +48,37 @@ const daysUntil = (date) => {
 };
 const defaultCategories = ["Dairy", "Meat", "Bakery", "Beverages", "Frozen", "General"];
 const defaultAlertSettings = { push: false, dailySummary: true, summaryTime: "08:00", reminderDays: 1, escalateAfterHours: 4 };
+
+/**
+ * Without this, any error thrown while rendering unmounts the entire React tree and
+ * the user is left looking at a blank page with no explanation and no way back. A
+ * boundary turns that into a readable panel with a reload button, so a failure in
+ * one screen can never present as "the app shows blank content".
+ */
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    // Keep the detail in the console too, so a report can include the stack.
+    console.error("RemoveWasteReminder crashed while rendering:", error, info?.componentStack);
+  }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return <div className="modalBackdrop"><div className="modal">
+      <p className="eyebrow">UNEXPECTED ERROR</p>
+      <h2>Something went wrong</h2>
+      <p className="hint">The screen could not be drawn. Your data is safe in the database — reload to carry on.</p>
+      <div className="error">{String(this.state.error?.message || this.state.error)}</div>
+      <button className="primary wide" onClick={() => window.location.reload()}><Activity size={18}/> Reload the app</button>
+      <button className="secondary wide" onClick={() => this.setState({ error: null })}>Try again</button>
+    </div></div>;
+  }
+}
 
 /* ------------------------------------------------- product pictures (free) ---
  * Requirement (new #1): any user can upload or snap a picture of the product.
@@ -1065,7 +1096,7 @@ function exportToCSV(products, username, onActivity) {
   if (onActivity) onActivity("csv_exported", `Exported ${products.length} products`);
 }
 
-createRoot(document.getElementById("root")).render(<App/>);
+createRoot(document.getElementById("root")).render(<ErrorBoundary><App/></ErrorBoundary>);
 
 
 
