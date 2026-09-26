@@ -242,14 +242,11 @@ export async function registerStaffMember(member) {
 	await updateProfile(credential.user, { displayName: `${staffNumber} (${storeNameFor(storeCode)})` });
 
 	try {
-	// Write the uid link FIRST: every store-scoped rule resolves the caller's store
-	// through it, so nothing else can be authorised until it exists.
-	await setDoc(doc(db, "staffByUid", credential.user.uid), {
-		staffDocId: docId,
-		storeCode,
-		staffNumber,
-		role
-	}, { merge: true });
+	// The staff record must exist before the uid link: the staffByUid create rule
+	// reads that staff document to prove the store and staff number being claimed
+	// are genuinely the caller's own. Writing the link first therefore always
+	// fails with "Missing or insufficient permissions". The record starts
+	// "pending" so the caller cannot self-promote.
 	await setDoc(doc(db, "staff", docId), {
 	staffNumber,
 	storeCode,
@@ -261,18 +258,26 @@ export async function registerStaffMember(member) {
 		authUid: credential.user.uid,
 	createdAt: serverTimestamp()
 	});
+	// Only now can the uid link be created — every store-scoped rule resolves the
+	// caller's store through it, so nothing else is authorised until it exists.
+	await setDoc(doc(db, "staffByUid", credential.user.uid), {
+		staffDocId: docId,
+		storeCode,
+		staffNumber,
+		role
+	}, { merge: true });
 	await setDoc(doc(db, "stores", storeCode), {
 	code: storeCode,
 	name: storeNameFor(storeCode),
 	memberUids: [credential.user.uid]
 	}, { merge: true });
-	} catch (error) {
-	// Don't leave an orphaned Auth credential if the Firestore write failed.
-	await signOut(auth).catch(() => {});
-	throw new Error(friendlyError(error));
+	  } catch (error) {
+		// Don't leave an orphaned Auth credential if the Firestore write failed.
+		await signOut(auth).catch(() => {});
+		throw new Error(friendlyError(error));
+		}
+		return { id: docId, staffNumber, storeCode, email };
 	}
-	return { id: docId, staffNumber, storeCode, email };
-}
 
 /* ------------------------------------------------------------------ staff --- */
 
@@ -391,6 +396,83 @@ export function watchDailyAnalytics(storeCode, onDays, onError) {
 
 export async function addActivity(storeCode, activity) { return addDoc(storeCollection(storeCode, "activity"), { ...activity, storeCode, createdAt: serverTimestamp() }); }
 export const saveStoreCategories = (storeCode, categories) => setDoc(storeRef(storeCode), { categories }, { merge: true });
+
+/* ------------------------------------------------ all store performance --- */
+
+// Firestore rules scope every caller to their own store, so a cross-store view is
+// assembled one permitted store document at a time and cached. That keeps the
+// aggregate free: no Cloud Function, no paid aggregation service, and the number
+// of reads is bounded by the fixed two-store list.
+export const STORE_PERFORMANCE_TTL_MS = 120000;
+const STORE_PERFORMANCE_KEY = "rwr.storePerformance";
+
+const summariseStore = (storeCode, removals) => {
+	const late = removals.filter(item => Number(item.daysOverdue || 0) > 0).length;
+	const removed = removals.length;
+	const onTime = removed - late;
+	return {
+		storeCode,
+		storeName: storeNameFor(storeCode),
+		removed,
+		onTime,
+		late,
+		onTimeRate: removed ? Math.round((onTime / removed) * 100) : 0,
+		wasteValue: removals.reduce((sum, item) => sum + Number(item.wasteValue || 0), 0),
+		// Requirement 4 (new): the graph compares removed on time against removed late.
+		timeline: removals.slice(0, 60).reverse().map(item => ({
+			productName: item.productName,
+			removedAt: item.removedAtISO,
+			daysOverdue: Number(item.daysOverdue || 0),
+			onTime: Number(item.daysOverdue || 0) <= 0
+		}))
+	};
+};
+
+export const readCachedStorePerformance = () => {
+	try {
+		const raw = window.localStorage.getItem(STORE_PERFORMANCE_KEY);
+		if (!raw) return null;
+		const parsed = JSON.parse(raw);
+		return Array.isArray(parsed?.stores) ? parsed : null;
+	} catch {
+		return null;
+	}
+};
+
+export const writeCachedStorePerformance = (stores) => {
+	const payload = { stores, updatedAt: new Date().toISOString() };
+	try { window.localStorage.setItem(STORE_PERFORMANCE_KEY, JSON.stringify(payload)); } catch { /* storage full or blocked */ }
+	return payload;
+};
+
+/**
+ * Requirement 4 (new): the All store performance view.
+ * Each store's removal history is read from that store's own collection, so the
+ * rules stay untouched and the figures are live rather than pre-aggregated.
+ */
+export async function readLiveStorePerformance(onProgress) {
+	if (!db) throw new Error("Firebase is not configured.");
+	const stores = [];
+	for (const store of STORES) {
+		try {
+			const snapshot = await getDocs(query(
+				storeCollection(store.code, "removals"),
+				orderBy("removedAt", "desc"),
+				limit(500)
+			));
+			stores.push(summariseStore(store.code, snapshot.docs.map(item => ({
+				id: item.id, ...item.data(),
+				removedAtISO: item.data().removedAt?.toDate?.()?.toISOString() || null
+			}))));
+		} catch (error) {
+			// A store the caller has no access to (or one with no removals yet) must
+			// not hide the stores they can see.
+			stores.push({ ...summariseStore(store.code, []), unavailable: true, message: friendlyError(error) });
+		}
+		onProgress?.(stores.length, STORES.length);
+	}
+	return writeCachedStorePerformance(stores).stores;
+}
 
 export async function saveStoreMemberProfile(storeCode, staff, profile) {
 	if (!db || !staff?.staffNumber) return;

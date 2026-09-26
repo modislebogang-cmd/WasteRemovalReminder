@@ -1,0 +1,10 @@
+add the new features without changing my current workflow and functionallity and styling
+
+new features include the following:
+1.add new feature that allows any user to add/upload picture of the product
+2. when user clicks product details it must show product deatils as pop up showing product pictucre or icon by just clicking the product details
+3. user must also be able to edit product details
+4. under activity add another button with the name all store perfomance showing all store waste removal history and also show a perfomance graph of removed on time vs removed late
+5. under settings change push notication and alert to button after clicking clicking enable user must be able to also click the disable button 
+
+for every feature added mark completed before continung to another step and also test moving to another feature

@@ -1,17 +1,20 @@
-﻿﻿import React, { useEffect, useMemo, useRef, useState } from "react";
+﻿﻿﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Html5Qrcode } from "html5-qrcode";
 import {
   Bell, CheckCircle2, ChevronRight, Clock3, Package,
   Plus, Search, Settings, Trash2, X, AlertTriangle, CalendarDays,
-  LayoutDashboard, ScanLine, ListChecks, Download, LogOut, Activity, UserCircle, ShieldCheck, Send, Save
+  LayoutDashboard, ScanLine, ListChecks, Download, LogOut, Activity, UserCircle, ShieldCheck, Send, Save,
+  ImagePlus, Pencil, BarChart3, TrendingUp, Loader2
 } from "lucide-react";
 import {
   firebaseEnabled, watchAuth, signInWithStaff, getStaffProfile, registerStaffMember, saveUserSettings, logOut,
   STORES, storeNameFor, watchStore, addSharedProduct, updateSharedProduct, addActivity, saveStoreCategories,
   addStoreAlert, recordRemoval, watchRemovals, watchDailyAnalytics, updateStaffProfile, checkDatabaseHealth,
-  sendStaffPasswordReset, friendlyError
-} from "./firebase";import "./styles.css";
+  sendStaffPasswordReset, friendlyError, STORE_PERFORMANCE_TTL_MS, readCachedStorePerformance,
+  readLiveStorePerformance
+} from "./firebase";
+import "./styles.css";
 
 // The staff document is keyed by store + staff number, neither of which is known on
 // a fresh page load. Remembering them locally lets the signed-in user read their own
@@ -46,6 +49,72 @@ const daysUntil = (date) => {
 const defaultCategories = ["Dairy", "Meat", "Bakery", "Beverages", "Frozen", "General"];
 const defaultAlertSettings = { push: false, dailySummary: true, summaryTime: "08:00", reminderDays: 1, escalateAfterHours: 4 };
 
+/* ------------------------------------------------- product pictures (free) ---
+ * Requirement (new #1): any user can upload or snap a picture of the product.
+ * There is no paid Storage bucket in use, so the picture is downscaled on the
+ * device and kept as a compact base64 data URL on the product document itself.
+ * That means no new service, no new cost, and it syncs to the team for free.
+ */
+const MAX_IMAGE_EDGE = 640;
+const MAX_IMAGE_BYTES = 90000;
+
+// Resize + compress the chosen file so it comfortably fits inside a Firestore
+// document alongside the rest of the product fields.
+const readImageFile = (file) => new Promise((resolve, reject) => {
+  if (!file) return reject(new Error("No image was selected."));
+  if (!String(file.type || "").startsWith("image/")) return reject(new Error("Choose an image file (JPG, PNG or WebP)."));
+  const reader = new FileReader();
+  reader.onerror = () => reject(new Error("That image could not be read. Try another one."));
+  reader.onload = () => {
+    const img = new Image();
+    img.onerror = () => reject(new Error("That image could not be read. Try another one."));
+    img.onload = () => {
+      const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(img.width * scale));
+      canvas.height = Math.max(1, Math.round(img.height * scale));
+      const context = canvas.getContext("2d");
+      context.drawImage(img, 0, 0, canvas.width, canvas.height);
+      let quality = 0.72;
+      let dataUrl = canvas.toDataURL("image/jpeg", quality);
+      while (dataUrl.length > MAX_IMAGE_BYTES && quality > 0.3) {
+        quality -= 0.12;
+        dataUrl = canvas.toDataURL("image/jpeg", quality);
+      }
+      resolve(dataUrl);
+    };
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+});
+
+// One reusable control so "add" and "edit" offer exactly the same picture flow.
+function ImagePicker({value,onChange,label}) {
+  const inputRef = useRef(null);
+  const [busy,setBusy] = useState(false);
+  const [error,setError] = useState("");
+  const pick = async event => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setError(""); setBusy(true);
+    try { onChange(await readImageFile(file)); }
+    catch (err) { setError(err?.message || "That image could not be added."); }
+    finally { setBusy(false); }
+  };
+  return <div className="imageUploader">
+    <button type="button" className="imageUploaderBtn" onClick={()=>inputRef.current?.click()} title={value?"Change picture":"Upload or take a picture"}>
+      {value
+        ? <><img src={value} alt="Product picture"/><span className="camOverlay"><ImagePlus size={13}/></span></>
+        : busy ? <Loader2 size={20} className="spin"/> : <><ImagePlus size={20}/><span>{busy?"Working...":"Add picture"}</span></>}
+    </button>
+    <input ref={inputRef} type="file" accept="image/*" capture="environment" onChange={pick}/>
+    <span className="hint">{label || "Upload or take a photo"}</span>
+    {value && <button type="button" className="thumbRemove" onClick={()=>onChange("")}><Trash2 size={13}/> Remove picture</button>}
+    {error && <span className="hint" style={{color:"var(--red)"}}>{error}</span>}
+  </div>;
+}
+
 function App() {
   const [products, setProducts] = useState([]);
   const [firebaseUser, setFirebaseUser] = useState(null);
@@ -69,6 +138,9 @@ function App() {
   const [showNotifications, setShowNotifications] = useState(true);
   const [alertSettings, setAlertSettings] = useState(defaultAlertSettings);
   const [avatarVariant] = useState(() => Math.floor(Math.random() * 4));
+  // Requirement 2 + 3 (new): the details popup and the edit form.
+  const [detailsId, setDetailsId] = useState("");
+  const [showEdit, setShowEdit] = useState(false);
 
   useEffect(() => {
     if (!firebaseEnabled) return;
@@ -210,6 +282,19 @@ function App() {
     }
   };
 
+  // Requirement 3 (new): save corrected product details, including the picture.
+  const saveProductEdits = async (id, updates) => {
+    const previous = products.find(p => p.id === id);
+    setProducts(ps => ps.map(p => p.id === id ? { ...p, ...updates, updatedByName: currentStaff.displayName || currentStaff.staffNumber } : p));
+    try {
+      if (firebaseEnabled && firebaseUser && storeCode) await updateSharedProduct(storeCode, id, updates, currentStaff);
+      recordActivity("product_updated", `${updates.name || previous?.name || id} - details edited${updates.image !== previous?.image ? " (picture changed)" : ""}`);
+    } catch (error) {
+      if (previous) setProducts(ps => ps.map(p => p.id === id ? previous : p));
+      setSyncError(`Could not update the product. ${friendlyError(error)}`);
+    }
+  };
+
   useEffect(() => {
     if (!user || !("Notification" in window) || !showNotifications) return;
     const reminders = active.filter(p => daysUntil(p.expiry) <= Number(alertSettings.reminderDays || 0));
@@ -238,6 +323,10 @@ function App() {
     onForgotPassword={async (staffNumber) => sendStaffPasswordReset(staffNumber)}
   />;
   if (!storeCode) return <StoreMissingView profile={staffProfile} onSignOut={logOut} />;
+
+  // Requirement 2 (new): the product whose details popup is open, kept in sync
+  // with the live collection so an edit shows immediately.
+  const detailedProduct = detailsId ? products.find(p => p.id === detailsId) : null;
 
   return (
     <div className="app">
@@ -296,12 +385,12 @@ function App() {
           <section className="section">
             <div className="sectionHead"><div><p className="eyebrow">ACTION REQUIRED</p><h2>Products to remove</h2></div><button className="textBtn" onClick={()=>setTab("products")}>View all <ChevronRight size={16}/></button></div>
             {dueToday.length + expired.length === 0 ? <Empty icon={<CheckCircle2/>} text="No products need removal today."/> :
-              <div className="productGrid">{[...expired,...dueToday].map(p=><ProductCard key={p.id} p={p} onRemove={removeProduct}/>)}</div>}
+              <div className="productGrid">{[...expired,...dueToday].map(p=><ProductCard key={p.id} p={p} onRemove={removeProduct} onOpen={item=>setDetailsId(item.id)}/>)}</div>}
           </section>
 
           <section className="section">
             <div className="sectionHead"><div><p className="eyebrow">COMING UP</p><h2>Expiry watch</h2></div></div>
-            {upcoming.length ? <div className="productGrid">{upcoming.slice(0,4).map(p=><ProductCard key={p.id} p={p}/>)}</div> : <Empty icon={<CalendarDays/>} text="No upcoming expiries in the next 7 days."/>}
+            {upcoming.length ? <div className="productGrid">{upcoming.slice(0,4).map(p=><ProductCard key={p.id} p={p} onOpen={item=>setDetailsId(item.id)}/>)}</div> : <Empty icon={<CalendarDays/>} text="No upcoming expiries in the next 7 days."/>}
           </section>
         </>}
 
@@ -333,7 +422,7 @@ function App() {
               <option value="8+">8+ days</option>
             </select>
           </div>
-          <div className="productGrid">{filtered.length ? filtered.map(p=><ProductCard key={p.id} p={p} onRemove={removeProduct} userRole={userRole}/>) : <Empty icon={<Package/>} text="No products match your filters."/>}</div>
+          <div className="productGrid">{filtered.length ? filtered.map(p=><ProductCard key={p.id} p={p} onRemove={removeProduct} onOpen={item=>setDetailsId(item.id)} userRole={userRole}/>) : <Empty icon={<Package/>} text="No products match your filters."/>}</div>
         </section>}
 
         {tab === "settings" && <section className="pageSection narrow">
@@ -376,7 +465,7 @@ function App() {
                 </div>
               </>
             )}
-            <AlertSettings settings={alertSettings} onChange={setAlertSettings} onRequestPush={async()=>{if("Notification" in window){const permission=await Notification.requestPermission();setAlertSettings(current=>({...current,push:permission === "granted"}))}}} onSave={async next=>{if(staffProfile?.id) await saveUserSettings(staffProfile.id,next);recordActivity("alert_settings_updated","Updated alert preferences")}} onEscalate={async message=>{if(firebaseEnabled && firebaseUser && storeCode) await addStoreAlert(storeCode,{message,from:user,type:"manager_escalation",status:"open"});recordActivity("manager_escalation",message)}} />
+            <AlertSettings settings={alertSettings} onChange={setAlertSettings} onRequestPush={async()=>{ if(!("Notification" in window)) return "This browser does not support notifications."; const permission=await Notification.requestPermission(); const granted=permission === "granted"; setAlertSettings(current=>({...current,push:granted})); if(granted && staffProfile?.id){ await saveUserSettings(staffProfile.id,{...alertSettings,push:true}); } recordActivity("push_notifications_enabled", granted?"Push notifications enabled":"Push permission not granted"); return granted?"" : "Notifications are blocked. Allow notifications for this site in your browser settings, then try again."; }} onDisablePush={async()=>{ setAlertSettings(current=>({...current,push:false})); if(staffProfile?.id){ await saveUserSettings(staffProfile.id,{...alertSettings,push:false}); } recordActivity("push_notifications_disabled","Push notifications turned off"); }} onSave={async next=>{if(staffProfile?.id) await saveUserSettings(staffProfile.id,next);recordActivity("alert_settings_updated",`Alerts ${next.dailySummary?"enabled":"disabled"}`)}} onEscalate={async message=>{if(firebaseEnabled && firebaseUser && storeCode) await addStoreAlert(storeCode,{message,from:user,type:"manager_escalation",status:"open"});recordActivity("manager_escalation",message)}} />
             <p className="hint">Staff can scan products and manage removals. Managers can view activity, export reports, and manage categories.</p>
           </div>
         </section>}
@@ -404,6 +493,22 @@ function App() {
 
       {showScanner && <ScannerModal onClose={()=>setShowScanner(false)} onScanned={(code)=>{setEditingBarcode(code);setShowScanner(false);setShowAdd(true)}}/>}
       {showAdd && <AddModal barcode={editingBarcode} onClose={()=>setShowAdd(false)} onSave={addProduct}/>}
+      {/* Requirement 2 (new): details popup, opened from any product card. */}
+      {detailedProduct && !showEdit && <ProductDetailsModal
+        product={detailedProduct}
+        userRole={userRole}
+        onClose={()=>setDetailsId("")}
+        onRemove={id=>{removeProduct(id);setDetailsId("");}}
+        onEdit={()=>setShowEdit(true)}
+      />}
+      {/* Requirement 3 (new): edit the product from inside its details popup. */}
+      {detailedProduct && showEdit && <EditProductModal
+        product={detailedProduct}
+        categories={categories}
+        canManageCost={userRole === "manager"}
+        onClose={()=>{setShowEdit(false);setDetailsId("");}}
+        onSave={async updates=>{await saveProductEdits(detailedProduct.id, updates);setShowEdit(false);setDetailsId("");}}
+      />}
     </div>
   );
 }
@@ -496,9 +601,40 @@ function AuthView({onSignIn,onRegister,onForgotPassword}) {
     <button className="secondary wide adminRegisterBtn" onClick={()=>{setRegister(!register);setError("");setNotice("");}}><ShieldCheck size={18}/>{register?"Back to sign in":"Register"}</button>
   </div></div>;
 }
-function AlertSettings({settings,onChange,onRequestPush,onSave,onEscalate}) {
+// Requirement 5 (new): push and alerts are now explicit Enable / Disable
+// buttons. Enabling push asks the browser for permission and only stays on when
+// the permission is actually granted; disabling turns it off and saves it.
+function AlertSettings({settings,onChange,onRequestPush,onDisablePush,onSave,onEscalate}) {
   const [message,setMessage]=useState("");
-  return <div className="phase4Settings"><label><input type="checkbox" checked={settings.push} onChange={onRequestPush}/> Push notifications</label><label><input type="checkbox" checked={settings.dailySummary} onChange={e=>onChange({...settings,dailySummary:e.target.checked})}/> Daily summary alerts</label>{settings.dailySummary&&<label>Summary time<input type="time" value={settings.summaryTime} onChange={e=>onChange({...settings,summaryTime:e.target.value})}/></label>}<label>Alert lead time in days<input type="number" min="0" max="7" value={settings.reminderDays} onChange={e=>onChange({...settings,reminderDays:Number(e.target.value)})}/></label><label>Escalate after hours<input type="number" min="1" max="48" value={settings.escalateAfterHours} onChange={e=>onChange({...settings,escalateAfterHours:Number(e.target.value)})}/></label><button className="secondary wide" onClick={()=>onSave(settings)}><Save size={18}/> Save alert settings</button><label>Message for manager<input value={message} onChange={e=>setMessage(e.target.value)} placeholder="What needs manager attention?"/></label><button className="secondary wide" disabled={!message.trim()} onClick={()=>{onEscalate(message.trim());setMessage("")}}><Send size={18}/> Escalate to manager</button></div>;
+  const [pushNote,setPushNote]=useState("");
+  const pushEnabled = !!settings.push;
+  const alertsEnabled = !!settings.dailySummary;
+  const togglePush = async () => {
+    if (pushEnabled) { setPushNote(""); await onDisablePush(); }
+    else { const result = await onRequestPush(); setPushNote(result || ""); }
+  };
+  const toggleAlerts = () => onChange({...settings,dailySummary:!alertsEnabled});
+  return <div className="phase4Settings">
+    <label>Push notifications</label>
+    <div className="settingsToggleRow">
+      <button className={`toggleBtn ${pushEnabled?"on":"off"}`} onClick={togglePush} disabled={pushEnabled}><Bell size={15}/> Enable</button>
+      <button className={`toggleBtn ${pushEnabled?"off":"on"}`} onClick={togglePush} disabled={!pushEnabled}><X size={15}/> Disable</button>
+      <span className="toggleState">{pushEnabled?"On":"Off"}</span>
+    </div>
+    {pushNote&&<p className="hint">{pushNote}</p>}
+    <label>Alert notifications</label>
+    <div className="settingsToggleRow">
+      <button className={`toggleBtn ${alertsEnabled?"on":"off"}`} onClick={toggleAlerts} disabled={alertsEnabled}><AlertTriangle size={15}/> Enable</button>
+      <button className={`toggleBtn ${alertsEnabled?"off":"on"}`} onClick={toggleAlerts} disabled={!alertsEnabled}><X size={15}/> Disable</button>
+      <span className="toggleState">{alertsEnabled?"On":"Off"}</span>
+    </div>
+    {alertsEnabled&&<label>Summary time<input type="time" value={settings.summaryTime} onChange={e=>onChange({...settings,summaryTime:e.target.value})}/></label>}
+    <label>Alert lead time in days<input type="number" min="0" max="7" value={settings.reminderDays} onChange={e=>onChange({...settings,reminderDays:Number(e.target.value)})}/></label>
+    <label>Escalate after hours<input type="number" min="1" max="48" value={settings.escalateAfterHours} onChange={e=>onChange({...settings,escalateAfterHours:Number(e.target.value)})}/></label>
+    <button className="secondary wide" onClick={()=>onSave(settings)}><Save size={18}/> Save alert settings</button>
+    <label>Message for manager<input value={message} onChange={e=>setMessage(e.target.value)} placeholder="What needs manager attention?"/></label>
+    <button className="secondary wide" disabled={!message.trim()} onClick={()=>{onEscalate(message.trim());setMessage("")}}><Send size={18}/> Escalate to manager</button>
+  </div>;
 }
 
 // Requirement 5: view and update the signed-in user's profile from Settings.
@@ -560,14 +696,18 @@ function NavItem({active,icon,text,onClick,primary}) {
 }
 function Empty({icon,text}) { return <div className="empty">{icon}<span>{text}</span></div> }
 
-function ProductCard({p,onRemove,userRole}) {
+function ProductCard({p,onRemove,userRole,onOpen}) {
   const d=daysUntil(p.expiry);
   const urgency=d<0?"expired":d===0?"today":d<=2?"soon":"normal";
-  return <div className={`productCard ${urgency}`}>
-    <div className="productIcon"><Package size={22}/></div>
+  // Requirement 2: tappingere on the card opens the product details popup.
+  const open = onOpen ? () => onOpen(p) : undefined;
+  return <div className={`productCard ${urgency} ${open?"cardClickable":""}`} onClick={open} role={open?"button":undefined} tabIndex={open?0:undefined}
+    onKeyDown={open?e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();open();}}:undefined}
+    title={open?"Tap for product details":undefined}>
+    <div className={`productIcon ${p.image?"hasPhoto":""}`}>{p.image?<img src={p.image} alt={p.name}/>:<Package size={22}/>}</div>
     <div className="productInfo"><strong>{p.name}</strong><span>{p.category || "General"} · {p.barcode}</span></div>
     <div className="expiry"><span>{d<0?`${Math.abs(d)}d overdue`:d===0?"REMOVE TODAY":`${d}d left`}</span><b>{new Date(p.expiry).toLocaleDateString()}</b></div>
-    {(onRemove && (userRole === "staff" || userRole === "manager")) && <button className="removeBtn" onClick={()=>onRemove(p.id)} title="Mark removed"><CheckCircle2 size={19}/></button>}
+    {(onRemove && (userRole === "staff" || userRole === "manager")) && <button className="removeBtn" onClick={e=>{e.stopPropagation();onRemove(p.id);}} title="Mark removed"><CheckCircle2 size={19}/></button>}
   </div>
 }
 
@@ -599,16 +739,79 @@ function ScannerModal({onClose,onScanned}) {
   </div></div>
 }
 
+// Requirement 1 (new): any user may attach a picture of the product when adding it.
 function AddModal({barcode,onClose,onSave}) {
   const [name,setName]=useState(""); const [expiry,setExpiry]=useState(""); const [category,setCategory]=useState("");
+  const [image,setImage]=useState("");
   return <div className="modalBackdrop"><div className="modal">
     <button className="close" onClick={onClose}><X/></button><p className="eyebrow">PRODUCT DETAILS</p><h2>Register product</h2>
     <label>Product name<input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Fresh Milk 2L"/></label>
     <label>Barcode<input value={barcode} readOnly/></label>
     <label>Expiry date<input type="date" value={expiry} onChange={e=>setExpiry(e.target.value)}/></label>
     <label>Category<input value={category} onChange={e=>setCategory(e.target.value)} placeholder="e.g. Dairy"/></label>
-    <button className="primary wide" disabled={!name||!expiry} onClick={()=>onSave({name,barcode,expiry,category})}><Bell size={18}/> Save & remind me</button>
+    <label>Product picture</label>
+    <ImagePicker value={image} onChange={setImage}/>
+    <button className="primary wide" disabled={!name||!expiry} onClick={()=>onSave({name,barcode,expiry,category,image})}><Bell size={18}/> Save & remind me</button>
   </div></div>
+}
+
+/**
+ * Requirements 2 and 3 (new).
+ * Tapping a product opens this popup: it shows the product picture (or the icon
+ * when no picture was uploaded), every detail on record, and for staff/managers
+ * the removal and edit actions.
+ */
+function ProductDetailsModal({product,userRole,onClose,onRemove,onEdit}) {
+  const d = daysUntil(product.expiry);
+  const canAct = userRole === "staff" || userRole === "manager";
+  return <div className="modalBackdrop" onClick={onClose}><div className="modal detailsModal" onClick={e=>e.stopPropagation()}>
+    <button className="close" onClick={onClose}><X/></button>
+    <p className="eyebrow">PRODUCT DETAILS</p>
+    <div className="detailsImage">{product.image?<img src={product.image} alt={product.name}/>:<Package size={64}/>}</div>
+    <h2>{product.name}</h2>
+    <div className="detailRow"><span>Category</span><strong>{product.category || "General"}</strong></div>
+    <div className="detailRow"><span>Barcode</span><strong>{product.barcode || "Not recorded"}</strong></div>
+    <div className="detailRow"><span>Expiry date</span><strong>{new Date(product.expiry).toLocaleDateString()}</strong></div>
+    <div className="detailRow"><span>Time remaining</span><strong className={d<0?"lateEm":"onTimeEm"}>{d<0?`${Math.abs(d)} day(s) overdue`:d===0?"REMOVE TODAY":`${d} day(s) left`}</strong></div>
+    <div className="detailRow"><span>Picture</span><strong>{product.image?"Uploaded":"Icon only"}</strong></div>
+    {product.createdByName && <div className="detailRow"><span>Added by</span><strong>{product.createdByName}</strong></div>}
+    {product.updatedByName && <div className="detailRow"><span>Last edited by</span><strong>{product.updatedByName}</strong></div>}
+    {product.removedByName && <div className="detailRow"><span>Removed by</span><strong>{product.removedByName}</strong></div>}
+    <div className="detailActions">
+      {canAct && <button className="secondary" onClick={()=>onEdit(product)}><Pencil size={17}/> Edit details</button>}
+      {canAct && <button className="removeBtn" onClick={()=>onRemove(product.id)} title="Mark removed"><CheckCircle2 size={17}/> Mark removed</button>}
+      <button className="secondary" onClick={onClose}>Close</button>
+    </div>
+  </div></div>;
+}
+
+// Requirement 3 (new): everyone can correct a product's details, including its picture.
+function EditProductModal({product,categories,canManageCost,onClose,onSave}) {
+  const [name,setName]=useState(product.name || "");
+  const [barcode,setBarcode]=useState(product.barcode || "");
+  const [expiry,setExpiry]=useState(product.expiry || "");
+  const [category,setCategory]=useState(product.category || "");
+  const [quantity,setQuantity]=useState(product.quantity ?? 1);
+  const [unitCost,setUnitCost]=useState(product.unitCost ?? 0);
+  const [image,setImage]=useState(product.image || "");
+  return <div className="modalBackdrop"><div className="modal">
+    <button className="close" onClick={onClose}><X/></button><p className="eyebrow">EDIT PRODUCT</p><h2>Update product details</h2>
+    <label>Product name<input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Fresh Milk 2L"/></label>
+    <label>Barcode<input value={barcode} onChange={e=>setBarcode(e.target.value)} placeholder="Scan or type the barcode"/></label>
+    <label>Expiry date<input type="date" value={expiry} onChange={e=>setExpiry(e.target.value)}/></label>
+    <label>Category<select value={category} onChange={e=>setCategory(e.target.value)} className="filterSelect">
+      <option value="">Select category</option>
+      {[...new Set([...categories, category].filter(Boolean))].map(cat => <option key={cat} value={cat}>{cat}</option>)}
+    </select></label>
+    <label>Quantity<input type="number" min="1" value={quantity} onChange={e=>setQuantity(Number(e.target.value))}/></label>
+    {canManageCost && <label>Unit cost (R)<input type="number" min="0" step="0.01" value={unitCost} onChange={e=>setUnitCost(Number(e.target.value))}/></label>}
+    <label>Product picture</label>
+    <ImagePicker value={image} onChange={setImage}/>
+    <button className="primary wide" disabled={!name||!expiry} onClick={()=>onSave({
+      name:name.trim(), barcode:barcode.trim(), expiry, category:category.trim() || "General",
+      quantity:Number(quantity)||1, unitCost:Number(unitCost)||0, image
+    })}><UserCircle size={18}/> Save changes</button>
+  </div></div>;
 }
 
 /**
@@ -619,6 +822,24 @@ function AddModal({barcode,onClose,onSave}) {
 function ActivityView({activities,removals,analyticsDays,storeCode,storeName,userRole,currentStaffNumber}) {
   const [pane,setPane]=useState("removals");
   const isManager = userRole === "manager";
+  // Requirement 4 (new): cross-store performance figures, cached so switching
+  // panes doesn't re-read the database.
+  const [storePerformance,setStorePerformance]=useState(()=>readCachedStorePerformance()?.stores || []);
+  const [perfBusy,setPerfBusy]=useState(false);
+  const [perfError,setPerfError]=useState("");
+
+  const loadStorePerformance = async (force=false) => {
+    setPerfError("");
+    const cached = readCachedStorePerformance();
+    const fresh = cached && (Date.now() - Date.parse(cached.updatedAt || 0)) < STORE_PERFORMANCE_TTL_MS;
+    if (!force && fresh) { setStorePerformance(cached.stores); return; }
+    setPerfBusy(true);
+    try { setStorePerformance(await readLiveStorePerformance()); }
+    catch (error) { setPerfError(friendlyError(error)); }
+    finally { setPerfBusy(false); }
+  };
+
+  useEffect(()=>{ if(pane==="stores") loadStorePerformance(); },[pane,storeCode]);
 
   // Requirement 3: store performance in waste removal.
   const analytics = useMemo(()=>{
@@ -651,6 +872,8 @@ function ActivityView({activities,removals,analyticsDays,storeCode,storeName,use
     <div className="filters">
       <button className={`filterSelect ${pane==="removals"?"active":""}`} onClick={()=>setPane("removals")}>Waste removed ({removals.length})</button>
       {isManager && <button className={`filterSelect ${pane==="analytics"?"active":""}`} onClick={()=>setPane("analytics")}>Store performance</button>}
+      {/* Requirement 4 (new): available to every role so anyone can compare stores. */}
+      <button className={`filterSelect ${pane==="stores"?"active":""}`} onClick={()=>setPane("stores")}><BarChart3 size={14}/> All store performance</button>
       {isManager && <button className={`filterSelect ${pane==="audit"?"active":""}`} onClick={()=>setPane("audit")}>Audit trail</button>}
     </div>
 
@@ -719,6 +942,34 @@ function ActivityView({activities,removals,analyticsDays,storeCode,storeName,use
       </div>
     </>}
 
+    {pane==="stores" && <>
+      <div className="sectionHead"><div><p className="eyebrow">ALL STORES</p><h2>Store waste removal performance</h2></div>
+        <button className="secondary" onClick={()=>loadStorePerformance(true)} disabled={perfBusy}><TrendingUp size={17}/> {perfBusy?"Loading...":"Refresh"}</button>
+      </div>
+      {perfError && <div className="error">{perfError}</div>}
+      {storePerformance.length===0 && perfBusy && <p className="hint">Loading store performance...</p>}
+      {storePerformance.length===0 && !perfBusy && <Empty icon={<BarChart3/>} text="No store performance recorded yet."/>}
+      {storePerformance.length>0 && <div className="settingsCard">
+        <StorePerformanceChart stores={storePerformance}/>
+      </div>}
+      {storePerformance.length>0 && <div className="activityList perfList">
+        {storePerformance.map(store => (
+          <div key={store.storeCode} className="activityItem">
+            <div className="actTime">{store.storeCode}</div>
+            <div className="actInfo">
+              <strong>{store.storeName || store.storeCode}</strong>
+              <span>{store.unavailable?"history unavailable":`${store.removed} removal${store.removed===1?"":"s"}`}</span>
+            </div>
+            <div className="actDetails">
+              {store.unavailable ? (store.message || "This store's history could not be read with your access.")
+                : `${store.onTime} on time \u00b7 ${store.late} late \u00b7 ${money(store.wasteValue)}`}
+            </div>
+          </div>
+        ))}
+      </div>}
+      <p className="hint">Figures cover the 500 most recent removals per store. Your access is limited to your own store's live data, so other stores may show as unavailable.</p>
+    </>}
+
     {pane==="audit" && isManager && <>
       <div className="sectionHead"><div><p className="eyebrow">AUDIT TRAIL</p><h2>User activity</h2></div></div>
       <div className="activityList">
@@ -739,6 +990,51 @@ function ActivityView({activities,removals,analyticsDays,storeCode,storeName,use
       </div>
     </>}
   </section>
+}
+
+/**
+ * Requirement 4 (new).
+ * A pure-CSS graph of removed on time against removed late, per store and as
+ * store totals. No charting dependency, so nothing new to install or pay for.
+ */
+function StorePerformanceChart({stores}) {
+  const visible = stores.filter(store => !store.unavailable);
+  if (!visible.length) return <p className="hint">No store data available to chart.</p>;
+  const totals = visible.reduce((sum,store)=>({
+    onTime: sum.onTime + Number(store.onTime||0),
+    late: sum.late + Number(store.late||0)
+  }),{onTime:0,late:0});
+  const totalRemoved = totals.onTime + totals.late;
+  const percent = value => totalRemoved ? `${Math.round((value/totalRemoved)*100)}%` : "0%";
+
+  return <div className="perfChart">
+    <label>Removed on time vs removed late</label>
+    <div className="perfTotals">
+      <span><i className="perfDot onTime"/><em className="onTimeEm">On time: {totals.onTime}</em> ({percent(totals.onTime)})</span>
+      <span><i className="perfDot late"/><em className="lateEm">Late: {totals.late}</em> ({percent(totals.late)})</span>
+    </div>
+    {visible.map(store=>{
+      const total = Number(store.onTime||0) + Number(store.late||0);
+      const onTimeWidth = total ? (store.onTime/total)*100 : 0;
+      const lateWidth = total ? (store.late/total)*100 : 0;
+      return <div key={store.storeCode} className="perfBarRow">
+        <div className="perfRow">
+          <div className="perfStore"><strong>{store.storeName || store.storeCode}</strong><span>{store.storeCode}</span></div>
+          <div className="perfBars">
+            <div className="perfBar" title={`${store.onTime} on time, ${store.late} late`}>
+              <i className="onTime" style={{width:`${onTimeWidth}%`}}/>
+              <i className="late" style={{width:`${lateWidth}%`}}/>
+            </div>
+            <div className="perfLegend">
+              <span><i className="perfDot onTime"/>{store.onTime} on time</span>
+              <span><i className="perfDot late"/>{store.late} late</span>
+            </div>
+          </div>
+          <div className="perfStats"><strong>{store.onTimeRate}% on time</strong><span>{total} removal{total===1?"":"s"} \u00b7 R {Number(store.wasteValue||0).toFixed(2)}</span></div>
+        </div>
+      </div>;
+    })}
+  </div>;
 }
 
 function exportToCSV(products, username, onActivity) {

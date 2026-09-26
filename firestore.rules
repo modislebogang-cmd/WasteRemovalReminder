@@ -32,6 +32,19 @@ service cloud.firestore {
       return signedIn() && myStoreCode() == storeCode;
     }
 
+    // Read-only access to the fixed store list (3156-Groblersdal, 3138-Jean Crossing).
+    // This exists so the "All store performance" view can read every store's removal
+    // history. It is deliberately narrow: the store codes are a closed set written
+    // into the rules, the caller must be signed in, and only the waste history is
+    // readable — products, categories, staff and activity stay private to their own
+    // store. Swap in a real cross-store role here if one is ever added.
+    function knownStoreCodes() {
+      return ['3156', '3138'];
+    }
+    function isKnownStore(storeCode) {
+      return signedIn() && storeCode in knownStoreCodes();
+    }
+
     function isManager() { return myRole() == 'manager'; }
 
     /* ------------------------------------------------------- staffByUid ----- */
@@ -120,8 +133,10 @@ service cloud.firestore {
       }
 
       // Removal history (requirement 6) and the analytics source (requirement 3).
+      // Readable by any signed-in team member so the cross-store performance view
+      // works; writes are still restricted to the caller's own store.
       match /removals/{removalId} {
-        allow read: if myStore(storeCode);
+        allow read: if myStore(storeCode) || isKnownStore(storeCode);
         allow create: if myStore(storeCode)
           && request.resource.data.removedBy == request.auth.uid;
         allow update, delete: if false;
